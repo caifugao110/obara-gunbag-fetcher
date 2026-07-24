@@ -1,0 +1,19 @@
+[project]
+name = "obara-gunbag-fetcher"
+version = "1.0.1"
+description = "A Python GUI tool for batch fetching gunbags from ZIP archives."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Tobin" }]
+license = { text = "MIT" }
+dependencies = [
+    "ttkbootstrap>=1.10.1",
+    "requests>=2.31.0",
+]
+[project.urls]
+Homepage = "https://github.com/caifugao110/obara-gunbag-fetcher"
+Repository = "https://github.com/caifugao110/obara-gunbag-fetcher"
+[project.scripts]
+obara-gunbag-fetcher = "app:main"
+[tool.setuptools]
+py-modules = ["app"]
