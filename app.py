@@ -136,46 +136,43 @@ def center_window(window: tk.Toplevel, parent: tk.Misc, width: int, height: int)
 
 
 def get_update_logs(count=5):
-    """从Gitee Releases API获取最近count条更新记录。"""
-    api_url = "https://gitee.com/api/v5/repos/caifugao110/obara-gunbag-fetcher/releases"
+    """从Gitee Commits API获取最近count条版本更新记录。
+
+    从master分支的commit历史中筛选包含版本号（如 v1.0.3）的提交，
+    使用完整commit message（含多行正文）作为更新日志。
+    """
+    api_url = "https://gitee.com/api/v5/repos/caifugao110/obara-gunbag-fetcher/commits"
     headers = {
         "Authorization": "token a09da64c1d9e9c7420a18dfd838890b0",
     }
     try:
-        response = requests.get(api_url, headers=headers, timeout=5)
+        response = requests.get(
+            api_url,
+            headers=headers,
+            params={"sha": "master", "per_page": 20},
+            timeout=5,
+        )
         response.raise_for_status()
-        releases = response.json()
+        commits = response.json()
 
         version_pattern = re.compile(r"v?(\d+\.\d+\.\d+)", re.IGNORECASE)
         updates = []
 
-        for release in releases:
-            tag_name = release.get("tag_name", "")
-            match = version_pattern.search(tag_name)
+        for commit in commits:
+            commit_data = commit.get("commit", {})
+            message = commit_data.get("message", "").strip()
+            match = version_pattern.search(message)
             if match:
                 version_str = match.group(1)
                 version_tuple = tuple(map(int, version_str.split(".")))
-                changelog = "暂无更新说明"
-                try:
-                    commit_url = f"https://gitee.com/api/v5/repos/caifugao110/obara-gunbag-fetcher/commits/{tag_name}"
-                    commit_resp = requests.get(commit_url, headers=headers, timeout=5)
-                    commit_resp.raise_for_status()
-                    commit_data = commit_resp.json()
-                    changelog = commit_data.get("commit", {}).get("message", "").strip() or "暂无更新说明"
-                except Exception:
-                    body = release.get("body", "")
-                    match_info = re.search(r"最后提交信息为.*?[:：]\s*(.*)", body, re.DOTALL)
-                    if match_info:
-                        extracted = match_info.group(1).strip()
-                        if extracted:
-                            changelog = extracted
-                created_at = release.get("created_at", "")[:10] if release.get("created_at") else ""
+                date_str = commit_data.get("committer", {}).get("date", "")[:10]
+                version_tag = f"v{version_str}"
                 updates.append(
                     {
-                        "version": tag_name,
+                        "version": version_tag,
                         "version_tuple": version_tuple,
-                        "changelog": changelog,
-                        "date": created_at,
+                        "changelog": message,
+                        "date": date_str,
                     }
                 )
 
@@ -1396,6 +1393,8 @@ class UpdateLogWindow(ttk.Toplevel):
 
         threading.Thread(target=fetch_logs, daemon=True).start()
 
+    GITEE_COMMITS_URL = "https://gitee.com/caifugao110/obara-gunbag-fetcher/commits/master"
+
     def _display_logs(self, logs):
         if not self.winfo_exists():
             return
@@ -1404,7 +1403,8 @@ class UpdateLogWindow(ttk.Toplevel):
         self.log_textbox.delete("1.0", tk.END)
 
         if not logs:
-            self.log_textbox.insert(tk.END, "无法获取更新日志，请检查网络连接。")
+            self.log_textbox.insert(tk.END, "无法获取更新日志，请检查网络连接。\n")
+            self._insert_more_link()
             self.log_textbox.configure(state="disabled")
             return
 
@@ -1418,7 +1418,17 @@ class UpdateLogWindow(ttk.Toplevel):
             self.log_textbox.insert(tk.END, "=" * 50 + "\n")
             self.log_textbox.insert(tk.END, f"{changelog}\n\n")
 
+        self._insert_more_link()
         self.log_textbox.configure(state="disabled")
+
+    def _insert_more_link(self):
+        self.log_textbox.insert(tk.END, "---\n")
+        self.log_textbox.insert(tk.END, "查看更多更新记录 → ", "link")
+        self.log_textbox.tag_config("link", foreground="#1565C0", underline=True)
+        self.log_textbox.tag_bind("link", "<Button-1>", lambda e: webbrowser.open(self.GITEE_COMMITS_URL))
+        self.log_textbox.tag_bind("link", "<Enter>", lambda e: self.log_textbox.configure(cursor="hand2"))
+        self.log_textbox.tag_bind("link", "<Leave>", lambda e: self.log_textbox.configure(cursor=""))
+        self.log_textbox.insert(tk.END, "\n")
 
 
 class HelpWindow(ttk.Toplevel):

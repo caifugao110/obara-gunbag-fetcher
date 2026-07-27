@@ -36,11 +36,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($full)) {
             $full = "Release V${{ steps.version.outputs.version }}"
           }
-          # Escape for GitHub Actions multiline output
-          $full = $full -replace '%', '%25'
-          $full = $full -replace "\n", '%0A'
-          $full = $full -replace "\r", '%0D'
-          echo "message=$full" >> $env:GITHUB_OUTPUT
+          $delim = "ghadelimiter_$(Get-Random)"
+          "message<<$delim" | Out-File $env:GITHUB_OUTPUT -Append -Encoding UTF8
+          "$full" | Out-File $env:GITHUB_OUTPUT -Append -Encoding UTF8
+          "$delim" | Out-File $env:GITHUB_OUTPUT -Append -Encoding UTF8
           Write-Host "Changelog: $full"
       - name: Create and push tag
         shell: pwsh
