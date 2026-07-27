@@ -14,6 +14,7 @@ env/
 # IDE
 .vscode/
 .idea/
+.trae/
 *.swp
 *.swo
 
@@ -26,3 +27,8 @@ Thumbs.db
 
 # Project output
 gunbag/
+Fetch log.csv
+
+# Index disk cache (runtime artifact, contains both 2D and 3D indices)
+.gunbag_cache.pkl
+.gunbag_cache.pkl.tmp

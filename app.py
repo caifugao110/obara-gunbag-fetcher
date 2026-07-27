@@ -3,6 +3,7 @@ from __future__ import annotations
 import configparser
 import csv
 import os
+import pickle
 import queue
 import re
 import shutil
@@ -219,6 +220,7 @@ def load_configuration(config_path):
         log_filename = config.get("Paths", "log_file")
         rename_option = config.getboolean("Settings", "rename_3d_files", fallback=False)
         include_xt = config.getboolean("Settings", "include_xt_format", fallback=False)
+        rebuild_index = config.getboolean("Settings", "rebuild_index_before_pack", fallback=True)
 
         root_path = get_root_path()
         source_dirs_3d = []
@@ -250,6 +252,7 @@ def load_configuration(config_path):
         print(f"   重试次数: {retry_attempts}")
         print(f"   3D按清单重命名: {'是' if rename_option else '否'}")
         print(f"   包含 XT 格式: {'是' if include_xt else '否'}")
+        print(f"   打包前重建索引: {'是' if rebuild_index else '否'}")
 
         return {
             "source_dirs_3d": source_dirs_3d,
@@ -265,6 +268,7 @@ def load_configuration(config_path):
             "config_path": config_path,
             "rename_3d_files": rename_option,
             "include_xt_format": include_xt,
+            "rebuild_index_before_pack": rebuild_index,
         }
     except Exception as e:
         print(f"🔥 配置文件解析失败: {str(e)}")
@@ -289,6 +293,7 @@ def save_configuration(config_path, config_data):
             "retry_attempts": str(config_data.get("retry_attempts", 3)),
             "rename_3d_files": str(config_data.get("rename_3d_files", False)).lower(),
             "include_xt_format": str(config_data.get("include_xt_format", False)).lower(),
+            "rebuild_index_before_pack": str(config_data.get("rebuild_index_before_pack", True)).lower(),
         }
 
         config["3D_SourceDirectories"] = {}
@@ -319,10 +324,12 @@ def apply_runtime_paths(config_data):
 
 
 def ensure_output_directory(output_dir):
-    """确保输出目录存在。"""
-    if not os.path.exists(output_dir):
-        print(f"📁 输出目录不存在，将创建: {output_dir}")
-        os.makedirs(output_dir, exist_ok=True)
+    """确保输出目录存在，并清空其内容。"""
+    if os.path.exists(output_dir):
+        print(f"📁 清空输出目录: {output_dir}")
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"📁 输出目录已就绪: {output_dir}")
 
 
 def is_xt_variant(filename):
@@ -373,11 +380,31 @@ def _scan_3d_dir_fast(src_dir, include_xt=False):
     return results
 
 
-def build_3d_index(source_dirs, include_xt=False, max_workers=12):
-    """构建3D文件索引（支持递归），支持可选包含 XT 格式以及 .stp。使用多线程加速。"""
+def build_3d_index(source_dirs, include_xt=False, max_workers=12, force_refresh=False):
+    """构建3D文件索引（支持递归），支持可选包含 XT 格式以及 .stp。使用多线程加速。
+    三级回退：会话内存缓存 → 磁盘缓存（跨会话）→ 全量扫描。
+    force_refresh=True 时跳过两级缓存，重新全量扫描并回写缓存。
+    """
+    cache_key = (tuple(sorted(source_dirs)), include_xt)
+
+    # 1. 会话内存缓存
+    if not force_refresh and cache_key in _3D_INDEX_CACHE:
+        index = _3D_INDEX_CACHE[cache_key]
+        print(f"✅ 3D索引命中会话缓存: {len(index)} 个前缀组（本会话已扫描过）")
+        return index
+
+    # 2. 磁盘缓存（跨会话，源目录不变即命中）
+    if not force_refresh:
+        disk_index = _load_3d_disk_cache(cache_key)
+        if disk_index is not None:
+            _3D_INDEX_CACHE[cache_key] = disk_index
+            print(f"✅ 3D索引命中磁盘缓存: {len(disk_index)} 个前缀组")
+            return disk_index
+
+    # 3. 全量扫描
     print("⏳ 正在构建3D文件索引（多线程扫描）...")
     start_time = time.time()
-    
+
     # 多线程并行扫描各个源目录
     all_results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -391,7 +418,7 @@ def build_3d_index(source_dirs, include_xt=False, max_workers=12):
                     print(f"   📁 {src}: 扫描到 {len(results)} 个文件")
             except Exception as e:
                 print(f"⚠️ 目录扫描失败: {src} - {str(e)}")
-    
+
     # 处理扫描结果
     index = {}
     for name, root in all_results:
@@ -401,82 +428,288 @@ def build_3d_index(source_dirs, include_xt=False, max_workers=12):
         if prefix_key not in index:
             index[prefix_key] = []
         index[prefix_key].append((clean_base, name, root))
-    
+
     total_files = len(all_results)
     index_time = time.time() - start_time
     print(f"✅ 3D索引构建完成: {len(index)} 个前缀组, {total_files} 个文件, 耗时 {index_time:.2f}秒")
+
+    _3D_INDEX_CACHE[cache_key] = index
+    _save_3d_disk_cache(cache_key, index)
     return index
 
 
-def _scan_single_dir_fast(src_dir):
-    """快速扫描单个目录（使用 os.scandir 递归），返回文件列表。"""
-    results = []
+# 会话级 2D 索引缓存：cache_key=(排序后的源目录元组) -> (index, dwg_count, pdf_count, scan_dirs)。
+# 同会话内对相同源目录集合的重复调用直接命中，避免重复遍历网络驱动器；源目录变更则自动失效。
+_2D_INDEX_CACHE: dict[tuple, tuple] = {}
+
+# 会话级 3D 索引缓存：cache_key=(排序后的源目录元组, include_xt) -> index。
+_3D_INDEX_CACHE: dict[tuple, dict] = {}
+
+_INDEX_REBUILT_THIS_SESSION = False
+
+
+def _scan_2d_dir_one(current):
+    """非递归扫描单个目录（仅一层），返回 (files, subdirs)。
+    files: [(ftype, name, current, mtime), ...]，ftype ∈ {'dwg','pdf'}；
+    DWG 记录修改时间用于多版本择新，PDF 仅作回退故存 0。
+    """
+    files = []
+    subdirs = []
     try:
-        # 使用 os.scandir 进行更快的遍历
-        stack = [src_dir]
-        while stack:
-            current = stack.pop()
-            try:
-                with os.scandir(current) as entries:
-                    for entry in entries:
-                        if entry.is_dir(follow_symlinks=False):
-                            stack.append(entry.path)
-                        elif entry.is_file(follow_symlinks=False):
-                            name = entry.name
-                            lower = name.lower()
-                            if lower.endswith('.dwg'):
-                                results.append(('dwg', name, current, entry.stat().st_mtime))
-                            elif lower.endswith('.pdf'):
-                                results.append(('pdf', name, current, 0))
-            except (PermissionError, OSError):
-                pass
-    except Exception as e:
+        with os.scandir(current) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        subdirs.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        name = entry.name
+                        lower = name.lower()
+                        if lower.endswith('.dwg'):
+                            files.append(('dwg', name, current, entry.stat().st_mtime))
+                        elif lower.endswith('.pdf'):
+                            files.append(('pdf', name, current, 0))
+                except OSError:
+                    continue
+    except (PermissionError, OSError):
         pass
-    return results
+    except Exception:
+        pass
+    return files, subdirs
 
 
-def build_2d_index(source_dirs, max_workers=12):
-    """构建2D文件索引（支持递归），索引 DWG 和 PDF，记录修改时间。使用多线程加速。"""
-    print("⏳ 正在构建2D文件索引（多线程扫描）...")
+def _scan_2d_worker_loop(dir_queue, fragments, state, cv):
+    """2D 扫描工作线程：从共享目录队列取目录、扫描一层、子目录回填队列，
+    把文件就地写入线程本地 index 片段。队列空且无活跃扫描时退出。
+    """
+    local_index = {}
+    while True:
+        # 1. 取一个目录（与终止判断原子化，都在 cv 锁内）
+        with cv:
+            while True:
+                try:
+                    current = dir_queue.get_nowait()
+                    break
+                except queue.Empty:
+                    if state["active"] == 0:
+                        # 队列空且无活跃扫描 → 全局完成，唤醒同伴一起退出
+                        cv.notify_all()
+                        fragments.append(local_index)
+                        return
+                    # 其他线程可能正在扫描并产出子目录，短暂等待
+                    cv.wait(timeout=0.05)
+            state["active"] += 1
+
+        # 2. 扫描一层（不持锁，允许多线程并发 I/O）
+        files, subdirs = _scan_2d_dir_one(current)
+
+        # 3. 文件写入线程本地片段（clean_filename/splitext/prefix_key 并行化）
+        for ftype, name, dirpath, mtime in files:
+            base_name = os.path.splitext(name)[0]
+            clean_base = clean_filename(base_name)
+            prefix_key = clean_base[:4] if len(clean_base) >= 4 else clean_base
+            bucket = local_index.get(prefix_key)
+            if bucket is None:
+                bucket = {"dwg": [], "pdf": []}
+                local_index[prefix_key] = bucket
+            if ftype == 'dwg':
+                bucket["dwg"].append((clean_base, name, dirpath, mtime))
+            else:
+                bucket["pdf"].append((clean_base, name, dirpath))
+
+        # 4. 子目录回填队列 + 状态更新（持锁）
+        with cv:
+            for d in subdirs:
+                dir_queue.put(d)
+            state["active"] -= 1
+            state["scanned_dirs"] += 1
+            state["scanned_files"] += len(files)
+            cv.notify_all()
+
+
+def _scan_2d_tree_parallel(source_dirs, max_workers):
+    """并行 BFS 扫描所有源目录树（子目录级并行，自动负载均衡）。
+    返回 (index, scanned_dirs, dwg_count, pdf_count)。
+    """
+    dir_queue = queue.Queue()
+    for src in source_dirs:
+        dir_queue.put(src)
+
+    fragments = []
+    state = {"active": 0, "scanned_dirs": 0, "scanned_files": 0}
+    cv = threading.Condition()
+
+    n_workers = max(1, min(max_workers, 64))
+    threads = [
+        threading.Thread(target=_scan_2d_worker_loop, args=(dir_queue, fragments, state, cv), daemon=True)
+        for _ in range(n_workers)
+    ]
+    for t in threads:
+        t.start()
+
+    # 主线程等待 + 每秒进度回显
     start_time = time.time()
-    
-    # 多线程并行扫描各个源目录
-    all_results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_scan_single_dir_fast, src): src for src in source_dirs}
-        for future in as_completed(futures):
-            src = futures[future]
-            try:
-                results = future.result()
-                all_results.extend(results)
-                if results:
-                    print(f"   📁 {src}: 扫描到 {len(results)} 个文件")
-            except Exception as e:
-                print(f"⚠️ 目录扫描失败: {src} - {str(e)}")
-    
-    # 处理扫描结果
+    last_report = 0.0
+    while any(t.is_alive() for t in threads):
+        time.sleep(0.2)
+        now = time.time()
+        if now - last_report >= 1.0:
+            last_report = now
+            with cv:
+                d = state["scanned_dirs"]
+                f = state["scanned_files"]
+            print(f"   ⏱️ 已扫描 {d} 个目录, {f} 个文件, 用时 {now - start_time:.1f}s")
+
+    for t in threads:
+        t.join()
+
+    # 合并各线程本地片段为最终 index
     index = {}
     dwg_count = 0
     pdf_count = 0
-    
-    for ftype, name, root, mtime in all_results:
-        base_name = os.path.splitext(name)[0]
-        clean_base = clean_filename(base_name)
-        prefix_key = clean_base[:4] if len(clean_base) >= 4 else clean_base
-        
-        if prefix_key not in index:
-            index[prefix_key] = {"dwg": [], "pdf": []}
-        
-        if ftype == 'dwg':
-            index[prefix_key]["dwg"].append((clean_base, name, root, mtime))
-            dwg_count += 1
-        else:
-            index[prefix_key]["pdf"].append((clean_base, name, root))
-            pdf_count += 1
-    
+    for frag in fragments:
+        for prefix_key, bucket in frag.items():
+            target = index.get(prefix_key)
+            if target is None:
+                index[prefix_key] = bucket
+            else:
+                target["dwg"].extend(bucket["dwg"])
+                target["pdf"].extend(bucket["pdf"])
+            dwg_count += len(bucket["dwg"])
+            pdf_count += len(bucket["pdf"])
+
+    return index, state["scanned_dirs"], dwg_count, pdf_count
+
+
+_CACHE_FILENAME = ".gunbag_cache.pkl"
+_CACHE_VERSION = 2
+
+
+def _cache_path():
+    """磁盘缓存文件路径（位于程序根目录）。"""
+    return os.path.join(get_root_path(), _CACHE_FILENAME)
+
+
+def _load_disk_cache():
+    """从磁盘加载完整缓存（含2D和3D索引）。返回 dict 或 None。"""
+    path = _cache_path()
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        if not isinstance(data, dict):
+            return None
+        if data.get("version") != _CACHE_VERSION:
+            return None
+        return data
+    except Exception as e:
+        print(f"⚠️ 磁盘缓存读取失败，将全量扫描: {e}")
+        return None
+
+
+def _save_disk_cache(data):
+    """把完整缓存原子写入磁盘（先写临时文件再 os.replace，避免半写损坏）。"""
+    path = _cache_path()
+    try:
+        data["version"] = _CACHE_VERSION
+        data["saved_at"] = time.time()
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f"⚠️ 磁盘缓存写入失败: {e}")
+
+
+def _load_2d_disk_cache(cache_key):
+    """从磁盘加载2D索引缓存。命中返回 (index, dwg_count, pdf_count, scan_dirs)，否则 None。"""
+    disk = _load_disk_cache()
+    if disk is None:
+        return None
+    cache_entry = disk.get("2d", {})
+    if cache_entry.get("cache_key") != cache_key:
+        return None
+    index = cache_entry.get("index")
+    if not isinstance(index, dict):
+        return None
+    return (index, cache_entry.get("dwg_count", 0), cache_entry.get("pdf_count", 0), cache_entry.get("scan_dirs", 0))
+
+
+def _save_2d_disk_cache(cache_key, index, dwg_count, pdf_count, scan_dirs):
+    """把2D索引写入磁盘缓存（与3D缓存共享同一文件）。"""
+    disk = _load_disk_cache() or {}
+    disk["2d"] = {
+        "cache_key": cache_key,
+        "index": index,
+        "dwg_count": dwg_count,
+        "pdf_count": pdf_count,
+        "scan_dirs": scan_dirs,
+    }
+    _save_disk_cache(disk)
+
+
+def _load_3d_disk_cache(cache_key):
+    """从磁盘加载3D索引缓存。命中返回 index，否则 None。"""
+    disk = _load_disk_cache()
+    if disk is None:
+        return None
+    cache_entry = disk.get("3d", {})
+    if cache_entry.get("cache_key") != cache_key:
+        return None
+    index = cache_entry.get("index")
+    if not isinstance(index, dict):
+        return None
+    return index
+
+
+def _save_3d_disk_cache(cache_key, index):
+    """把3D索引写入磁盘缓存（与2D缓存共享同一文件）。"""
+    disk = _load_disk_cache() or {}
+    disk["3d"] = {
+        "cache_key": cache_key,
+        "index": index,
+    }
+    _save_disk_cache(disk)
+
+
+def build_2d_index(source_dirs, max_workers=12, force_refresh=False):
+    """构建2D文件索引（子目录级并行扫描），索引 DWG 和 PDF，记录修改时间。
+    三级回退：会话内存缓存 → 磁盘缓存（跨会话）→ 全量扫描。
+    force_refresh=True 时跳过两级缓存，重新全量扫描并回写缓存。
+    """
+    print("⏳ 正在构建2D文件索引（多线程扫描）...")
+    start_time = time.time()
+
+    cache_key = tuple(sorted(source_dirs))
+
+    # 1. 会话内存缓存
+    if not force_refresh and cache_key in _2D_INDEX_CACHE:
+        index, dwg_count, pdf_count, scan_dirs = _2D_INDEX_CACHE[cache_key]
+        total = dwg_count + pdf_count
+        print(f"✅ 2D索引命中会话缓存: {len(index)} 个前缀组, {dwg_count} DWG + {pdf_count} PDF = {total} 个文件, {scan_dirs} 个目录（本会话已扫描过）")
+        return index
+
+    # 2. 磁盘缓存（跨会话，源目录不变即命中）
+    if not force_refresh:
+        disk = _load_2d_disk_cache(cache_key)
+        if disk is not None:
+            index, dwg_count, pdf_count, scan_dirs = disk
+            _2D_INDEX_CACHE[cache_key] = disk
+            total = dwg_count + pdf_count
+            load_time = time.time() - start_time
+            print(f"✅ 2D索引命中磁盘缓存: {len(index)} 个前缀组, {dwg_count} DWG + {pdf_count} PDF = {total} 个文件, {scan_dirs} 个目录, 加载 {load_time:.2f}秒")
+            return index
+
+    # 3. 全量扫描
+    index, scan_dirs, dwg_count, pdf_count = _scan_2d_tree_parallel(source_dirs, max_workers)
+
     total_files = dwg_count + pdf_count
     index_time = time.time() - start_time
-    print(f"✅ 2D索引构建完成: {len(index)} 个前缀组, {dwg_count} DWG + {pdf_count} PDF = {total_files} 个文件, 耗时 {index_time:.2f}秒")
+    print(f"✅ 2D索引构建完成: {len(index)} 个前缀组, {dwg_count} DWG + {pdf_count} PDF = {total_files} 个文件, 扫描 {scan_dirs} 个目录, 耗时 {index_time:.2f}秒")
+
+    cached = (index, dwg_count, pdf_count, scan_dirs)
+    _2D_INDEX_CACHE[cache_key] = cached
+    _save_2d_disk_cache(cache_key, index, dwg_count, pdf_count, scan_dirs)
     return index
 
 
@@ -524,7 +757,7 @@ def find_3d_file(search_name, index_3d, rename_3d=False):
 
 
 def find_2d_file(search_name, index_2d):
-    """查找2D文件，优先DWG，多个时取最新日期；没有则PDF。返回 (src_path, dst_name) 或 None。"""
+    """查找2D文件，优先DWG，多个时优先选路径含"已导入PDM"的，再按修改时间取最新；没有则PDF。返回 (src_path, dst_name) 或 None。"""
     prefix_key = search_name[:4] if len(search_name) >= 4 else search_name
     if prefix_key not in index_2d:
         return None
@@ -534,8 +767,8 @@ def find_2d_file(search_name, index_2d):
 
     matched_dwgs = [item for item in dwg_list if item[0] == search_name]
     if matched_dwgs:
-        # 按修改时间降序，取最新的
-        matched_dwgs.sort(key=lambda x: x[3], reverse=True)
+        # 优先选路径含"已导入PDM"的，再按修改时间降序取最新
+        matched_dwgs.sort(key=lambda x: (0 if "已导入PDM" in x[2] else 1, -x[3]))
         _, src_filename, src_dir, _ = matched_dwgs[0]
         src_path = os.path.join(src_dir, src_filename)
         return (src_path, src_filename)
@@ -558,7 +791,8 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
             "status": "cancelled",
             "original": original_name,
             "zip_file": "操作已取消",
-            "files_found": [],
+            "found_3d_path": "",
+            "found_2d_path": "",
             "files_missing": [],
         }
 
@@ -566,20 +800,21 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
     found_2d = find_2d_file(search_name, index_2d)
 
     files_to_pack = []
-    files_found = []
     files_missing = []
+    found_3d_path = ""
+    found_2d_path = ""
 
     if found_3d:
         src_path, src_name, dst_name = found_3d
         files_to_pack.append((src_path, dst_name))
-        files_found.append(f"3D:{src_name}")
+        found_3d_path = src_path
     else:
         files_missing.append("3D")
 
     if found_2d:
         src_path, dst_name = found_2d
         files_to_pack.append((src_path, dst_name))
-        files_found.append(f"2D:{dst_name}")
+        found_2d_path = src_path
     else:
         files_missing.append("2D")
 
@@ -588,7 +823,8 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
             "status": "not_found",
             "original": original_name,
             "zip_file": "未找到任何文件",
-            "files_found": [],
+            "found_3d_path": "",
+            "found_2d_path": "",
             "files_missing": ["3D", "2D"],
         }
 
@@ -601,7 +837,8 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
                 "status": "cancelled",
                 "original": original_name,
                 "zip_file": "操作已取消",
-                "files_found": files_found,
+                "found_3d_path": found_3d_path,
+                "found_2d_path": found_2d_path,
                 "files_missing": files_missing,
             }
 
@@ -614,7 +851,8 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
                 "status": "success",
                 "original": original_name,
                 "zip_file": zip_filename,
-                "files_found": files_found,
+                "found_3d_path": found_3d_path,
+                "found_2d_path": found_2d_path,
                 "files_missing": files_missing,
             }
         except Exception as e:
@@ -625,7 +863,8 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
                     "status": "error",
                     "original": original_name,
                     "zip_file": f"打包失败: {str(e)}",
-                    "files_found": files_found,
+                    "found_3d_path": found_3d_path,
+                    "found_2d_path": found_2d_path,
                     "files_missing": files_missing,
                 }
 
@@ -633,7 +872,8 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
         "status": "error",
         "original": original_name,
         "zip_file": "未知错误",
-        "files_found": files_found,
+        "found_3d_path": found_3d_path,
+        "found_2d_path": found_2d_path,
         "files_missing": files_missing,
     }
 
@@ -661,8 +901,20 @@ def worker(config, progress_callback, stop_event):
     include_xt = config.get("include_xt_format", False)
 
     ensure_output_directory(output_dir)
-    index_3d = build_3d_index(source_dirs_3d, include_xt=include_xt, max_workers=max_workers)
-    index_2d = build_2d_index(source_dirs_2d, max_workers=max_workers)
+
+    global _INDEX_REBUILT_THIS_SESSION
+    rebuild_index = config.get("rebuild_index_before_pack", True)
+    force_rebuild = rebuild_index and not _INDEX_REBUILT_THIS_SESSION
+    if force_rebuild:
+        print("🔄 首次打包且开启重建索引：强制重建2D/3D索引（跳过缓存）")
+        _2D_INDEX_CACHE.clear()
+        _3D_INDEX_CACHE.clear()
+        _INDEX_REBUILT_THIS_SESSION = True
+    elif rebuild_index:
+        print("📌 重建索引开关已开启，但本会话已重建过索引，本次跳过")
+
+    index_3d = build_3d_index(source_dirs_3d, include_xt=include_xt, max_workers=max_workers, force_refresh=force_rebuild)
+    index_2d = build_2d_index(source_dirs_2d, max_workers=max_workers, force_refresh=force_rebuild)
 
     original_files = read_original_file_list(list_file)
     if not original_files or len(original_files) == 0:
@@ -743,17 +995,18 @@ def worker(config, progress_callback, stop_event):
 
 
 def write_result_log(log_file, result_log):
-    """写入日志文件，使用GBK编码兼容Excel。"""
+    """写入日志文件，使用GBK编码兼容Excel。2D和3D来源路径分列显示。"""
     print("📝 正在写入日志文件...")
     try:
         with open(log_file, "w", encoding="gbk", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["原始文件名", "ZIP文件名", "找到的文件", "缺失的文件", "状态"])
+            writer.writerow(["原始文件名", "ZIP文件名", "3D文件路径", "2D文件路径", "缺失的文件", "状态"])
             for res in result_log:
-                found = ";".join(res["files_found"]) if res["files_found"] else "无"
+                found_3d = res.get("found_3d_path", "") or "无"
+                found_2d = res.get("found_2d_path", "") or "无"
                 missing = ";".join(res["files_missing"]) if res["files_missing"] else "无"
                 status = res["status"]
-                writer.writerow([res["original"], res["zip_file"], found, missing, status])
+                writer.writerow([res["original"], res["zip_file"], found_3d, found_2d, missing, status])
         print(f"✅ 日志已保存至: {log_file}")
         return True
     except Exception as e:
@@ -1240,6 +1493,7 @@ class GunbagFetcherApp(ttk.Window):
         self.list_label_var = tk.StringVar(value="未选择")
         self.rename_checkbox_var = tk.BooleanVar(value=False)
         self.include_xt_checkbox_var = tk.BooleanVar(value=False)
+        self.rebuild_index_var = tk.BooleanVar(value=True)
         self.progress_percent_var = tk.StringVar(value="0%")
         self.stats_var = tk.StringVar(value="已处理: 0 | 成功: 0 | 失败: 0 | 速度: 0 文件/秒")
         self.status_var = tk.StringVar(value="正在初始化")
@@ -1259,7 +1513,7 @@ class GunbagFetcherApp(ttk.Window):
 
         title = ttk.Label(header, text="obara-gunbag-fetcher", font=("Microsoft YaHei UI", 22, "bold"))
         title.grid(row=0, column=0, sticky="w")
-        meta = ttk.Label(header, text=f"{VERSION} 枪衣获取工具", bootstyle="secondary")
+        meta = ttk.Label(header, text=f"{VERSION} 小原枪衣获取工具", bootstyle="secondary")
         meta.grid(row=1, column=0, sticky="w", pady=(2, 0))
 
         theme_bar = ttk.Frame(header)
@@ -1327,6 +1581,19 @@ class GunbagFetcherApp(ttk.Window):
             bootstyle="round-toggle",
             command=self._on_include_xt_change,
         ).pack(anchor="w", pady=3)
+        ttk.Checkbutton(
+            option_box,
+            text="重建2D/3D目录索引",
+            variable=self.rebuild_index_var,
+            bootstyle="round-toggle",
+            command=self._on_rebuild_index_change,
+        ).pack(anchor="w", pady=3)
+        ttk.Label(
+            option_box,
+            text="既制焊枪关闭此开关,加快处理速度",
+            font=("Arial", 9, "italic"),
+            bootstyle="secondary",
+        ).pack(anchor="w", padx=24, pady=(0, 6))
 
         action_box = ttk.Labelframe(parent, text="执行", padding=12)
         action_box.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -1425,6 +1692,18 @@ class GunbagFetcherApp(ttk.Window):
             self._clear_log()
             self.config_data = load_configuration(self.config_path)
 
+    def _on_rebuild_index_change(self):
+        global _INDEX_REBUILT_THIS_SESSION
+        if not self.rebuild_index_var.get():
+            _INDEX_REBUILT_THIS_SESSION = False
+            _2D_INDEX_CACHE.clear()
+            _3D_INDEX_CACHE.clear()
+        if self.config_data and self.config_path:
+            self.config_data["rebuild_index_before_pack"] = self.rebuild_index_var.get()
+            save_configuration(self.config_path, self.config_data)
+            self._clear_log()
+            self.config_data = load_configuration(self.config_path)
+
     def _change_theme(self, _=None):
         self.style.theme_use(self.theme_var.get())
 
@@ -1502,6 +1781,7 @@ class GunbagFetcherApp(ttk.Window):
             if self.config_data:
                 self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
                 self.include_xt_checkbox_var.set(self.config_data.get("include_xt_format", False))
+                self.rebuild_index_var.set(self.config_data.get("rebuild_index_before_pack", True))
 
                 default_list = self.config_data.get("list_file")
                 if os.path.exists(default_list):
@@ -1527,6 +1807,7 @@ class GunbagFetcherApp(ttk.Window):
             if self.config_data:
                 self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
                 self.include_xt_checkbox_var.set(self.config_data.get("include_xt_format", False))
+                self.rebuild_index_var.set(self.config_data.get("rebuild_index_before_pack", True))
 
                 list_file = self.config_data.get("list_file")
                 if os.path.exists(list_file):
@@ -1562,6 +1843,7 @@ class GunbagFetcherApp(ttk.Window):
                     self.config_data["list_file"] = file_path
                     self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
                     self.include_xt_checkbox_var.set(self.config_data.get("include_xt_format", False))
+                    self.rebuild_index_var.set(self.config_data.get("rebuild_index_before_pack", True))
 
             if self.config_data:
                 self.start_btn.configure(state="normal")
@@ -1594,6 +1876,7 @@ class GunbagFetcherApp(ttk.Window):
         if self.config_data:
             self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
             self.include_xt_checkbox_var.set(self.config_data.get("include_xt_format", False))
+            self.rebuild_index_var.set(self.config_data.get("rebuild_index_before_pack", True))
 
             list_file = self.config_data.get("list_file")
             if os.path.exists(list_file):
@@ -1634,8 +1917,7 @@ class GunbagFetcherApp(ttk.Window):
         self._clear_log()
 
         output_dir = self.config_data.get("output_dir")
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
+        ensure_output_directory(output_dir)
 
         self.running = True
         self.start_btn.configure(state="disabled")
@@ -1653,6 +1935,7 @@ class GunbagFetcherApp(ttk.Window):
         if self.config_data is not None:
             self.config_data["include_xt_format"] = self.include_xt_checkbox_var.get()
             self.config_data["rename_3d_files"] = self.rename_checkbox_var.get()
+            self.config_data["rebuild_index_before_pack"] = self.rebuild_index_var.get()
             self.config_data["list_file"] = self.list_file_path
             if self.config_path:
                 save_configuration(self.config_path, self.config_data)

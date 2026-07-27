@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 param(
-    [string]$ProjectDir = $PSScriptRoot,
+    [string]$ProjectDir = (Split-Path $PSScriptRoot),
     [switch]$SkipCleanup
 )
 
@@ -26,16 +26,20 @@ Write-Info "Creating virtual environment..."
 python -m venv $VenvDir
 
 # Step 2: Install dependencies
-$pip = Join-Path $VenvDir "Scripts\pip.exe"
-& $pip install --upgrade pip | Out-Null
-& $pip install -r (Join-Path $ProjectDir "requirements.txt") | Out-Null
-& $pip install pyinstaller | Out-Null
+$pythonExe = Join-Path $VenvDir "Scripts\python.exe"
+& $pythonExe -m pip install --upgrade pip | Out-Null
+& $pythonExe -m pip install -r (Join-Path $ProjectDir "requirements.txt") | Out-Null
+& $pythonExe -m pip install pyinstaller | Out-Null
 Write-Success "Dependencies installed"
 
 # Step 3: Build with PyInstaller
 $pyi = Join-Path $VenvDir "Scripts\pyinstaller.exe"
 $SpecFile = Join-Path $ProjectDir "obara-gunbag-fetcher.spec"
 
+$assetsDir = Join-Path $ProjectDir "assets"
+$pyprojectToml = Join-Path $ProjectDir "pyproject.toml"
+$configIni = Join-Path $ProjectDir "config.ini"
+$originalListFile = Join-Path $ProjectDir "Original file list.txt"
 $PyInstallerArgs = @(
     "--name", "obara-gunbag-fetcher",
     "--onefile",
@@ -45,10 +49,13 @@ $PyInstallerArgs = @(
     "--distpath", $DistDir,
     "--workpath", $BuildDir,
     "--specpath", $ProjectDir,
-    "--add-data", "config.ini;."
+    "--add-data", "$assetsDir;assets",
+    "--add-data", "$pyprojectToml;.",
+    "--add-data", "$configIni;.",
+    "--collect-data", "ttkbootstrap"
 )
 
-$iconPath = Join-Path $ProjectDir "assets" "app.ico"
+$iconPath = Join-Path (Join-Path $ProjectDir "assets") "app.ico"
 if (Test-Path $iconPath) {
     $PyInstallerArgs += "--icon"
     $PyInstallerArgs += $iconPath
@@ -63,8 +70,10 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 # Step 4: Copy additional files to dist
 $assetsDest = Join-Path $DistDir "assets"
 if (-not (Test-Path $assetsDest)) { New-Item -ItemType Directory -Path $assetsDest | Out-Null }
-$iconSrc = Join-Path $ProjectDir "assets" "app.ico"
+$iconSrc = Join-Path (Join-Path $ProjectDir "assets") "app.ico"
 if (Test-Path $iconSrc) { Copy-Item $iconSrc $assetsDest -Force }
+if (Test-Path $configIni) { Copy-Item $configIni $DistDir -Force }
+if (Test-Path $originalListFile) { Copy-Item $originalListFile $DistDir -Force }
 
 Write-Success "Build completed: $DistDir\obara-gunbag-fetcher.exe"
 

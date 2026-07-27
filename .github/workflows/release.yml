@@ -63,6 +63,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pyinstaller
       - name: Build exe with PyInstaller
         run: |
           pyinstaller `
@@ -75,7 +76,13 @@ jobs:
             --add-data ".\assets;assets" `
             --add-data ".\pyproject.toml;." `
             --add-data ".\config.ini;." `
+            --collect-data "ttkbootstrap" `
             ".\app.py"
+      - name: Copy additional files
+        shell: pwsh
+        run: |
+          Copy-Item ".\config.ini" ".\dist\" -Force
+          Copy-Item ".\Original file list.txt" ".\dist\" -Force -ErrorAction SilentlyContinue
       - name: Verify build
         shell: pwsh
         run: |
