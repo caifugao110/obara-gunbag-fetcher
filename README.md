@@ -83,7 +83,7 @@
 - **主题切换**：内置多种 ttkbootstrap 主题，实时切换
 - 左侧面板：
   - **文件设置**：选择配置文件和原始清单文件
-  - **选项**：3D 重命名开关、XT 格式包含开关、索引重建开关（带提示说明）
+  - **选项**：3D 重命名开关、XT 格式包含开关、索引重建开关、桌面优先开关
   - **执行**：开始批量打包、停止处理、配置管理、清单管理、打开输出目录、查看日志、清空日志框
 - 右侧面板：处理进度条（含百分比）、统计信息（已处理/成功/失败/速度）、实时日志显示
 - 底部状态栏：当前运行状态（初始化/配置已加载/任务运行中/任务完成等）
@@ -132,8 +132,8 @@ dist\obara-gunbag-fetcher.exe
 构建脚本会自动：
 1. 创建临时虚拟环境 `.venv`
 2. 升级 pip 并安装项目依赖 + PyInstaller
-3. 调用 PyInstaller 打包为单文件窗口程序（`--onefile --windowed`），嵌入 `config.ini` 和图标资源
-4. 复制图标到 `dist/assets/`
+3. 调用 PyInstaller 打包为单文件窗口程序（`--onefile --windowed`），图标嵌入 exe
+4. 复制 `config.ini` 和清单文件到 `dist/`
 5. 清理临时文件（可通过 `-SkipCleanup` 参数跳过）
 
 ### PyInstaller 打包参数
@@ -143,8 +143,12 @@ dist\obara-gunbag-fetcher.exe
 | `--name` | `obara-gunbag-fetcher` | 输出的 exe 名称 |
 | `--onefile` | — | 打包为单文件 |
 | `--windowed` | — | 不显示控制台窗口 |
-| `--add-data` | `config.ini;.` | 将配置文件嵌入可执行程序 |
+| `--add-data` | `assets;assets` | 将图标等资源嵌入可执行程序 |
+| `--add-data` | `pyproject.toml;.` | 嵌入项目元数据 |
+| `--add-data` | `config.ini;.` | 嵌入默认配置文件 |
 | `--icon` | `assets/app.ico` | 设置应用图标 |
+| `--collect-data` | `ttkbootstrap` | 收集 ttkbootstrap 主题数据 |
+| `--collect-all` | `requests` | 收集 requests 模块全部内容 |
 
 ### 构建选项
 
@@ -175,6 +179,7 @@ retry_attempts = 3
 rename_3d_files = false
 include_xt_format = false
 rebuild_index_before_pack = true
+prefer_desktop = true
 
 [3D_SourceDirectories]
 source_1 = \\192.168.160.2\生产管理部3d\3D 资料\设计一课3D资料\03-SV GUN STEP
@@ -202,6 +207,7 @@ source_4 = \\192.168.160.2\生产管理部\制造技术一课\checkc
 | `rename_3d_files` | bool | 是否按清单重命名 3D 文件 | `false` |
 | `include_xt_format` | bool | 是否包含 XT 格式文件 | `false` |
 | `rebuild_index_before_pack` | bool | 打包前是否重建索引 | `true` |
+| `prefer_desktop` | bool | 优先将输出保存到桌面 gunbag 目录 | `true` |
 | `3D_SourceDirectories.source_*` | string | 3D 源目录（完整 UNC 或本地路径） | — |
 | `2D_SourceDirectories.source_*` | string | 2D 源目录（完整 UNC 或本地路径） | — |
 
@@ -212,6 +218,7 @@ source_4 = \\192.168.160.2\生产管理部\制造技术一课\checkc
 - **按照清单重命名 3D 文件** — 切换开关立即保存
 - **包含 XT 格式 3D 文件** — 切换开关立即保存
 - **重建 2D/3D 目录索引** — 切换开关立即保存，关闭时清空缓存以加速下次启动
+- **优先保存在桌面 gunbag 目录** — 切换开关立即保存，开启后输出目录切换至桌面
 
 通过"配置管理"按钮保存的变更也会立即写入 `config.ini`，无需重启程序。
 

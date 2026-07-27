@@ -235,7 +235,13 @@ def load_configuration(config_path):
                 full_path = config.get("2D_SourceDirectories", key)
                 source_dirs_2d.append(full_path)
 
-        output_dir = os.path.join(root_path, output_dir_name)
+        prefer_desktop = config.getboolean("Settings", "prefer_desktop", fallback=True)
+
+        if prefer_desktop:
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+            output_dir = os.path.join(desktop, output_dir_name)
+        else:
+            output_dir = os.path.join(root_path, output_dir_name)
         list_file = os.path.join(root_path, original_list_filename)
         log_file = os.path.join(root_path, log_filename)
 
@@ -253,6 +259,7 @@ def load_configuration(config_path):
         print(f"   3D按清单重命名: {'是' if rename_option else '否'}")
         print(f"   包含 XT 格式: {'是' if include_xt else '否'}")
         print(f"   打包前重建索引: {'是' if rebuild_index else '否'}")
+        print(f"   桌面优先: {'是' if prefer_desktop else '否'}")
 
         return {
             "source_dirs_3d": source_dirs_3d,
@@ -269,6 +276,7 @@ def load_configuration(config_path):
             "rename_3d_files": rename_option,
             "include_xt_format": include_xt,
             "rebuild_index_before_pack": rebuild_index,
+            "prefer_desktop": prefer_desktop,
         }
     except Exception as e:
         print(f"🔥 配置文件解析失败: {str(e)}")
@@ -294,6 +302,7 @@ def save_configuration(config_path, config_data):
             "rename_3d_files": str(config_data.get("rename_3d_files", False)).lower(),
             "include_xt_format": str(config_data.get("include_xt_format", False)).lower(),
             "rebuild_index_before_pack": str(config_data.get("rebuild_index_before_pack", True)).lower(),
+            "prefer_desktop": str(config_data.get("prefer_desktop", True)).lower(),
         }
 
         config["3D_SourceDirectories"] = {}
@@ -317,7 +326,11 @@ def save_configuration(config_path, config_data):
 def apply_runtime_paths(config_data):
     """根据当前程序根目录补齐运行时使用的文件路径。"""
     root_path = get_root_path()
-    config_data["output_dir"] = os.path.join(root_path, config_data.get("output_dir_name", "output"))
+    if config_data.get("prefer_desktop", True):
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        config_data["output_dir"] = os.path.join(desktop, config_data.get("output_dir_name", "output"))
+    else:
+        config_data["output_dir"] = os.path.join(root_path, config_data.get("output_dir_name", "output"))
     config_data["list_file"] = os.path.join(root_path, config_data.get("original_list_filename", "Original file list.txt"))
     config_data["log_file"] = os.path.join(root_path, config_data.get("log_filename", "log.csv"))
     return config_data
@@ -1079,6 +1092,7 @@ class SettingsWindow(ttk.Toplevel):
 
         self.rename_var = tk.BooleanVar(value=self.config_data.get("rename_3d_files", False))
         self.include_xt_var = tk.BooleanVar(value=self.config_data.get("include_xt_format", False))
+        self.prefer_desktop_var = tk.BooleanVar(value=self.config_data.get("prefer_desktop", True))
         ttk.Checkbutton(
             perf,
             text="按照清单重命名3D文件",
@@ -1091,6 +1105,12 @@ class SettingsWindow(ttk.Toplevel):
             variable=self.include_xt_var,
             bootstyle="round-toggle",
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(
+            perf,
+            text="优先保存在桌面gunbag目录",
+            variable=self.prefer_desktop_var,
+            bootstyle="round-toggle",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         source_3d = ttk.Labelframe(main, text="3D源目录管理", padding=12)
         source_3d.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -1242,6 +1262,7 @@ class SettingsWindow(ttk.Toplevel):
             self.config_data["source_dirs_2d"] = source_dirs_2d
             self.config_data["rename_3d_files"] = self.rename_var.get()
             self.config_data["include_xt_format"] = self.include_xt_var.get()
+            self.config_data["prefer_desktop"] = self.prefer_desktop_var.get()
             apply_runtime_paths(self.config_data)
 
             if self.on_save_callback:
@@ -1494,6 +1515,7 @@ class GunbagFetcherApp(ttk.Window):
         self.rename_checkbox_var = tk.BooleanVar(value=False)
         self.include_xt_checkbox_var = tk.BooleanVar(value=False)
         self.rebuild_index_var = tk.BooleanVar(value=True)
+        self.prefer_desktop_var = tk.BooleanVar(value=True)
         self.progress_percent_var = tk.StringVar(value="0%")
         self.stats_var = tk.StringVar(value="已处理: 0 | 成功: 0 | 失败: 0 | 速度: 0 文件/秒")
         self.status_var = tk.StringVar(value="正在初始化")
@@ -1588,12 +1610,14 @@ class GunbagFetcherApp(ttk.Window):
             bootstyle="round-toggle",
             command=self._on_rebuild_index_change,
         ).pack(anchor="w", pady=3)
-        ttk.Label(
+        ttk.Checkbutton(
             option_box,
-            text="既制焊枪关闭此开关,加快处理速度",
-            font=("Arial", 9, "italic"),
-            bootstyle="secondary",
-        ).pack(anchor="w", padx=24, pady=(0, 6))
+            text="优先保存在桌面gunbag目录",
+            variable=self.prefer_desktop_var,
+            bootstyle="round-toggle",
+            command=self._on_prefer_desktop_change,
+        ).pack(anchor="w", pady=3)
+
 
         action_box = ttk.Labelframe(parent, text="执行", padding=12)
         action_box.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -1704,6 +1728,13 @@ class GunbagFetcherApp(ttk.Window):
             self._clear_log()
             self.config_data = load_configuration(self.config_path)
 
+    def _on_prefer_desktop_change(self):
+        if self.config_data and self.config_path:
+            self.config_data["prefer_desktop"] = self.prefer_desktop_var.get()
+            save_configuration(self.config_path, self.config_data)
+            self._clear_log()
+            self.config_data = load_configuration(self.config_path)
+
     def _change_theme(self, _=None):
         self.style.theme_use(self.theme_var.get())
 
@@ -1782,6 +1813,7 @@ class GunbagFetcherApp(ttk.Window):
                 self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
                 self.include_xt_checkbox_var.set(self.config_data.get("include_xt_format", False))
                 self.rebuild_index_var.set(self.config_data.get("rebuild_index_before_pack", True))
+                self.prefer_desktop_var.set(self.config_data.get("prefer_desktop", True))
 
                 default_list = self.config_data.get("list_file")
                 if os.path.exists(default_list):
@@ -1808,6 +1840,7 @@ class GunbagFetcherApp(ttk.Window):
                 self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
                 self.include_xt_checkbox_var.set(self.config_data.get("include_xt_format", False))
                 self.rebuild_index_var.set(self.config_data.get("rebuild_index_before_pack", True))
+                self.prefer_desktop_var.set(self.config_data.get("prefer_desktop", True))
 
                 list_file = self.config_data.get("list_file")
                 if os.path.exists(list_file):
@@ -1844,6 +1877,7 @@ class GunbagFetcherApp(ttk.Window):
                     self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
                     self.include_xt_checkbox_var.set(self.config_data.get("include_xt_format", False))
                     self.rebuild_index_var.set(self.config_data.get("rebuild_index_before_pack", True))
+                    self.prefer_desktop_var.set(self.config_data.get("prefer_desktop", True))
 
             if self.config_data:
                 self.start_btn.configure(state="normal")
@@ -1860,6 +1894,7 @@ class GunbagFetcherApp(ttk.Window):
                 "source_dirs_2d": [],
                 "rename_3d_files": False,
                 "include_xt_format": False,
+                "prefer_desktop": True,
             }
 
         settings_window = SettingsWindow(self, self.config_data, self._on_settings_saved)
@@ -1877,6 +1912,7 @@ class GunbagFetcherApp(ttk.Window):
             self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
             self.include_xt_checkbox_var.set(self.config_data.get("include_xt_format", False))
             self.rebuild_index_var.set(self.config_data.get("rebuild_index_before_pack", True))
+            self.prefer_desktop_var.set(self.config_data.get("prefer_desktop", True))
 
             list_file = self.config_data.get("list_file")
             if os.path.exists(list_file):
@@ -1936,6 +1972,7 @@ class GunbagFetcherApp(ttk.Window):
             self.config_data["include_xt_format"] = self.include_xt_checkbox_var.get()
             self.config_data["rename_3d_files"] = self.rename_checkbox_var.get()
             self.config_data["rebuild_index_before_pack"] = self.rebuild_index_var.get()
+            self.config_data["prefer_desktop"] = self.prefer_desktop_var.get()
             self.config_data["list_file"] = self.list_file_path
             if self.config_path:
                 save_configuration(self.config_path, self.config_data)
