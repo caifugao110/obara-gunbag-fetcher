@@ -848,6 +848,17 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
             "files_missing": ["3D", "2D"],
         }
 
+    if files_missing:
+        missing_desc = "、".join(files_missing)
+        return {
+            "status": "incomplete",
+            "original": original_name,
+            "zip_file": f"缺少{missing_desc}文件，未压缩",
+            "found_3d_path": found_3d_path,
+            "found_2d_path": found_2d_path,
+            "files_missing": files_missing,
+        }
+
     zip_filename = f"{original_name}.zip"
     zip_path = os.path.join(output_dir, zip_filename)
 
@@ -915,6 +926,7 @@ def worker(config, progress_callback, stop_event):
     result_log = []
     success_count = 0
     not_found_count = 0
+    incomplete_count = 0
     pack_errors = 0
     skipped_count = 0
 
@@ -988,6 +1000,8 @@ def worker(config, progress_callback, stop_event):
                 skipped_count += 1
             elif result["status"] == "not_found":
                 not_found_count += 1
+            elif result["status"] == "incomplete":
+                incomplete_count += 1
             elif result["status"] == "error":
                 pack_errors += 1
 
@@ -996,7 +1010,7 @@ def worker(config, progress_callback, stop_event):
                     "update",
                     idx + 1,
                     success_count,
-                    not_found_count + pack_errors,
+                    not_found_count + incomplete_count + pack_errors,
                     (idx + 1) / max(1, time.time() - program_start_time),
                     skipped_count,
                 )
@@ -1016,21 +1030,13 @@ def worker(config, progress_callback, stop_event):
         if spec_mode:
             print(f"⏭️   跳过(已存在): {skipped_count}")
         print(f"❌   未找到: {not_found_count} ({not_found_count / max(1, total_files):.1%})")
+        print(f"📋   文件不完整(缺2D或3D): {incomplete_count} ({incomplete_count / max(1, total_files):.1%})")
         print(f"⚠️   打包错误: {pack_errors}")
         print(f"⏱️   总耗时: {total_time:.1f}秒 | 平均速度: {total_files / max(1, total_time):.1f} 文件/秒")
         print(f"🔧   3D重命名模式: {'启用' if rename_3d else '禁用'}")
         print(f"🔧   包含 XT: {'是' if include_xt else '否'}")
         print(f"🔧   仕样号模式: {'启用' if spec_mode else '禁用'}")
         print("=" * 60)
-
-        failure_rate = (not_found_count + pack_errors) / max(1, total_files)
-        if failure_rate > 0.5:
-            print(f"\n⚠️ 警告: 超过50%的文件处理失败 ({failure_rate:.1%})！")
-            print("⚠️ 可能的原因:")
-            print("⚠️   - 网络驱动器连接异常")
-            print("⚠️   - 源目录路径不正确")
-            print("⚠️   - 文件名不匹配")
-            print("⚠️ 请检查配置文件和网络连接状态")
 
         print("\n🎉 程序执行完成！")
     else:
