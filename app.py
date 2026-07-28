@@ -117,6 +117,10 @@ def asset_path(name: str) -> Path:
 
 ASSET_ICON = asset_path("app.ico")
 
+# 仕样号模式：仕样号文件夹根目录与输入框占位提示
+SPEC_BASE_DIR = r"\\192.168.160.70\文件中转\临时文件\00枪衣数模"
+SPEC_PLACEHOLDER = "请输入仕样号"
+
 
 def open_path(path: str | Path) -> None:
     target = str(path)
@@ -200,7 +204,7 @@ def clean_filename(name):
     return name.lower()
 
 
-def load_configuration(config_path):
+def load_configuration(config_path, spec_mode=False):
     """加载配置文件。"""
     if not os.path.exists(config_path):
         print(f"🔥 配置文件不存在: {config_path}")
@@ -233,6 +237,7 @@ def load_configuration(config_path):
                 source_dirs_2d.append(full_path)
 
         prefer_desktop = config.getboolean("Settings", "prefer_desktop", fallback=True)
+        spec_base_dir = config.get("Settings", "spec_base_dir", fallback=SPEC_BASE_DIR)
 
         if prefer_desktop:
             desktop = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -245,10 +250,10 @@ def load_configuration(config_path):
         max_workers = config.getint("Settings", "max_workers", fallback=12)
         retry_attempts = config.getint("Settings", "retry_attempts", fallback=3)
 
-        print("✅ 配置加载成功:")
+        mode_label = "仕样号模式" if spec_mode else "普通模式"
+        print(f"✅ 配置加载成功（{mode_label}）:")
         print(f"   3D源目录数量: {len(source_dirs_3d)}")
         print(f"   2D源目录数量: {len(source_dirs_2d)}")
-        print(f"   输出目录: {output_dir}")
         print(f"   待处理列表: {list_file}")
         print(f"   日志文件: {log_file}")
         print(f"   最大线程数: {max_workers}")
@@ -256,7 +261,10 @@ def load_configuration(config_path):
         print(f"   3D按清单重命名: {'是' if rename_option else '否'}")
         print(f"   包含 XT 格式: {'是' if include_xt else '否'}")
         print(f"   打包前重建索引: {'是' if rebuild_index else '否'}")
-        print(f"   桌面优先: {'是' if prefer_desktop else '否'}")
+        if spec_mode:
+            print(f"   仕样号文件夹: {spec_base_dir}")
+        else:
+            print(f"   输出目录: {output_dir}")
 
         return {
             "source_dirs_3d": source_dirs_3d,
@@ -274,6 +282,7 @@ def load_configuration(config_path):
             "include_xt_format": include_xt,
             "rebuild_index_before_pack": rebuild_index,
             "prefer_desktop": prefer_desktop,
+            "spec_base_dir": spec_base_dir,
         }
     except Exception as e:
         print(f"🔥 配置文件解析失败: {str(e)}")
@@ -300,6 +309,7 @@ def save_configuration(config_path, config_data):
             "include_xt_format": str(config_data.get("include_xt_format", False)).lower(),
             "rebuild_index_before_pack": str(config_data.get("rebuild_index_before_pack", True)).lower(),
             "prefer_desktop": str(config_data.get("prefer_desktop", True)).lower(),
+            "spec_base_dir": config_data.get("spec_base_dir", SPEC_BASE_DIR),
         }
 
         config["3D_SourceDirectories"] = {}
@@ -792,8 +802,8 @@ def find_2d_file(search_name, index_2d):
     return None
 
 
-def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_event, rename_3d, include_xt):
-    """处理单个清单项：查找2D和3D文件，打包为ZIP。"""
+def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_event, rename_3d, include_xt, spec_mode=False):
+    """处理单个清单项：查找2D和3D文件，打包为ZIP。仕样号模式下跳过已存在的ZIP。"""
     original_name, search_name = item
 
     if stop_event.is_set():
@@ -840,6 +850,17 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
 
     zip_filename = f"{original_name}.zip"
     zip_path = os.path.join(output_dir, zip_filename)
+
+    # 仕样号模式：若ZIP已存在则跳过（追加模式，不覆盖已有数据）
+    if spec_mode and os.path.exists(zip_path):
+        return {
+            "status": "skipped",
+            "original": original_name,
+            "zip_file": zip_filename,
+            "found_3d_path": found_3d_path,
+            "found_2d_path": found_2d_path,
+            "files_missing": files_missing,
+        }
 
     for attempt in range(retry_attempts):
         if stop_event.is_set():
@@ -895,6 +916,7 @@ def worker(config, progress_callback, stop_event):
     success_count = 0
     not_found_count = 0
     pack_errors = 0
+    skipped_count = 0
 
     if not config:
         progress_queue.put(("complete", False))
@@ -909,8 +931,14 @@ def worker(config, progress_callback, stop_event):
     retry_attempts = config["retry_attempts"]
     rename_3d = config.get("rename_3d_files", False)
     include_xt = config.get("include_xt_format", False)
+    spec_mode = config.get("spec_mode", False)
 
-    ensure_output_directory(output_dir)
+    if spec_mode:
+        # 仕样号模式：不清空目录，仅确保存在（追加模式）
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"📁 仕样号目录已就绪（追加模式，不清空）: {output_dir}")
+    else:
+        ensure_output_directory(output_dir)
 
     global _INDEX_REBUILT_THIS_SESSION
     rebuild_index = config.get("rebuild_index_before_pack", True)
@@ -936,10 +964,11 @@ def worker(config, progress_callback, stop_event):
 
     search_items = [(orig, clean_filename(orig)) for orig in original_files]
 
-    print(f"📦 开始并行打包... {'(3D将按清单重命名)' if rename_3d else ''} {'(包含XT)' if include_xt else ''}")
+    mode_hint = "（仕样号追加模式）" if spec_mode else ""
+    print(f"📦 开始并行打包{mode_hint}... {'(3D将按清单重命名)' if rename_3d else ''} {'(包含XT)' if include_xt else ''}")
     executor = ThreadPoolExecutor(max_workers=max_workers)
     futures = [
-        executor.submit(process_item, item, output_dir, index_3d, index_2d, retry_attempts, stop_event, rename_3d, include_xt)
+        executor.submit(process_item, item, output_dir, index_3d, index_2d, retry_attempts, stop_event, rename_3d, include_xt, spec_mode)
         for item in search_items
     ]
 
@@ -955,6 +984,8 @@ def worker(config, progress_callback, stop_event):
 
             if result["status"] == "success":
                 success_count += 1
+            elif result["status"] == "skipped":
+                skipped_count += 1
             elif result["status"] == "not_found":
                 not_found_count += 1
             elif result["status"] == "error":
@@ -967,6 +998,7 @@ def worker(config, progress_callback, stop_event):
                     success_count,
                     not_found_count + pack_errors,
                     (idx + 1) / max(1, time.time() - program_start_time),
+                    skipped_count,
                 )
             )
     finally:
@@ -981,11 +1013,14 @@ def worker(config, progress_callback, stop_event):
         print("=" * 60)
         print(f"📊   总文件数: {total_files}")
         print(f"✅   成功打包: {success_count} ({success_count / max(1, total_files):.1%})")
+        if spec_mode:
+            print(f"⏭️   跳过(已存在): {skipped_count}")
         print(f"❌   未找到: {not_found_count} ({not_found_count / max(1, total_files):.1%})")
         print(f"⚠️   打包错误: {pack_errors}")
         print(f"⏱️   总耗时: {total_time:.1f}秒 | 平均速度: {total_files / max(1, total_time):.1f} 文件/秒")
         print(f"🔧   3D重命名模式: {'启用' if rename_3d else '禁用'}")
         print(f"🔧   包含 XT: {'是' if include_xt else '否'}")
+        print(f"🔧   仕样号模式: {'启用' if spec_mode else '禁用'}")
         print("=" * 60)
 
         failure_rate = (not_found_count + pack_errors) / max(1, total_files)
@@ -1042,164 +1077,131 @@ class StdoutRedirector:
 
 
 class SettingsWindow(ttk.Toplevel):
-    """配置管理窗口。"""
+    """配置管理窗口（单页布局，按普通/仕样号模式分区）。"""
 
     def __init__(self, parent, config_data, on_save_callback):
         super().__init__(parent)
         self.title("配置管理")
-        self.geometry("800x900")
-        self.minsize(700, 700)
+        self.geometry("860x760")
+        self.minsize(740, 660)
         self.config_data = config_data.copy() if config_data else {}
         self.on_save_callback = on_save_callback
 
         self.transient(parent)
         self.grab_set()
-        center_window(self, parent, 800, 900)
+        center_window(self, parent, 860, 760)
         self._build_ui()
 
     def _build_ui(self):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        main = ttk.Frame(self, padding=16)
+        main = ttk.Frame(self, padding=14)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(3, weight=1)
-        main.rowconfigure(5, weight=1)
+        main.rowconfigure(4, weight=1)
 
-        basic = ttk.Labelframe(main, text="基本设置", padding=12)
-        basic.grid(row=0, column=0, sticky="ew")
-        basic.columnconfigure(1, weight=1)
+        # ── 通用设置 ──
+        common = ttk.Labelframe(main, text="通用设置", padding=10)
+        common.grid(row=0, column=0, sticky="ew")
+        common.columnconfigure(1, weight=1)
+        common.columnconfigure(3, weight=1)
 
-        self.output_entry = self._add_entry_row(basic, 0, "输出目录名", self.config_data.get("output_dir_name", "output"))
-        self.list_entry = self._add_entry_row(
-            basic,
-            1,
-            "原始清单文件",
-            self.config_data.get("original_list_filename", "Original file list.txt"),
-        )
-        self.log_entry = self._add_entry_row(basic, 2, "日志文件名", self.config_data.get("log_filename", "log.csv"))
+        self.list_entry = self._add_entry(common, 0, "原始清单文件", self.config_data.get("original_list_filename", "Original file list.txt"), span=3)
+        self.log_entry = self._add_entry(common, 1, "日志文件名", self.config_data.get("log_filename", "log.csv"), span=3)
 
-        perf = ttk.Labelframe(main, text="性能设置", padding=12)
-        perf.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        perf.columnconfigure(1, weight=1)
-
-        self.workers_entry = self._add_entry_row(perf, 0, "最大线程数", str(self.config_data.get("max_workers", 12)))
-        self.retry_entry = self._add_entry_row(perf, 1, "重试次数", str(self.config_data.get("retry_attempts", 3)))
+        ttk.Label(common, text="最大线程数").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.workers_entry = ttk.Entry(common)
+        self.workers_entry.grid(row=2, column=1, sticky="ew", pady=4)
+        self.workers_entry.insert(0, str(self.config_data.get("max_workers", 12)))
+        ttk.Label(common, text="重试次数").grid(row=2, column=2, sticky="w", padx=(14, 8), pady=4)
+        self.retry_entry = ttk.Entry(common, width=10)
+        self.retry_entry.grid(row=2, column=3, sticky="w", pady=4)
+        self.retry_entry.insert(0, str(self.config_data.get("retry_attempts", 3)))
 
         self.rename_var = tk.BooleanVar(value=self.config_data.get("rename_3d_files", False))
         self.include_xt_var = tk.BooleanVar(value=self.config_data.get("include_xt_format", False))
+        ttk.Checkbutton(
+            common, text="按照清单重命名3D文件", variable=self.rename_var, bootstyle="round-toggle"
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            common, text="包含 XT 格式3D文件", variable=self.include_xt_var, bootstyle="round-toggle"
+        ).grid(row=3, column=2, columnspan=2, sticky="w", pady=(8, 0))
+
+        # ── 普通/仕样号 模式设置（左右并排） ──
+        mode_row = ttk.Frame(main)
+        mode_row.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        mode_row.columnconfigure(0, weight=1)
+        mode_row.columnconfigure(1, weight=1)
+
+        normal_box = ttk.Labelframe(mode_row, text="普通模式设置", padding=10)
+        normal_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        normal_box.columnconfigure(1, weight=1)
+        self.output_entry = self._add_entry(normal_box, 0, "输出目录名", self.config_data.get("output_dir_name", "output"))
         self.prefer_desktop_var = tk.BooleanVar(value=self.config_data.get("prefer_desktop", True))
         ttk.Checkbutton(
-            perf,
-            text="按照清单重命名3D文件",
-            variable=self.rename_var,
-            bootstyle="round-toggle",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(
-            perf,
-            text="包含 XT 格式3D文件",
-            variable=self.include_xt_var,
-            bootstyle="round-toggle",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Checkbutton(
-            perf,
-            text="优先保存在桌面gunbag目录",
-            variable=self.prefer_desktop_var,
-            bootstyle="round-toggle",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            normal_box, text="优先保存在桌面gunbag目录", variable=self.prefer_desktop_var, bootstyle="round-toggle"
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        source_3d = ttk.Labelframe(main, text="3D源目录管理", padding=12)
-        source_3d.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        spec_box = ttk.Labelframe(mode_row, text="仕样号模式设置", padding=10)
+        spec_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        spec_box.columnconfigure(1, weight=1)
+        self.spec_base_dir_entry = self._add_entry(spec_box, 0, "仕样号文件夹", self.config_data.get("spec_base_dir", SPEC_BASE_DIR))
+        ttk.Label(spec_box, text="作为仕样号子目录的根路径（唯一）", bootstyle="secondary").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
+
+        # ── 3D 源目录 ──
+        source_3d = ttk.Labelframe(main, text="3D源目录管理", padding=10)
+        source_3d.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         source_3d.columnconfigure(0, weight=1)
         source_3d.rowconfigure(0, weight=1)
+        self.source_3d_text = self._build_dir_textarea(source_3d, self.config_data.get("source_dirs_3d", []))
+        self._build_dir_buttons(source_3d, self._add_source_3d, self._remove_source_3d, self._clear_source_3d)
 
-        text_outer_3d = ttk.Frame(source_3d)
-        text_outer_3d.grid(row=0, column=0, sticky="nsew")
-        text_outer_3d.columnconfigure(0, weight=1)
-        text_outer_3d.rowconfigure(0, weight=1)
-
-        self.source_3d_text = tk.Text(
-            text_outer_3d,
-            height=6,
-            wrap="none",
-            font=("Microsoft YaHei UI", 10),
-            relief="solid",
-            borderwidth=1,
-        )
-        self.source_3d_text.grid(row=0, column=0, sticky="nsew")
-        yscroll_3d = ttk.Scrollbar(text_outer_3d, orient=tk.VERTICAL, command=self.source_3d_text.yview)
-        yscroll_3d.grid(row=0, column=1, sticky="ns")
-        xscroll_3d = ttk.Scrollbar(text_outer_3d, orient=tk.HORIZONTAL, command=self.source_3d_text.xview)
-        xscroll_3d.grid(row=1, column=0, sticky="ew")
-        self.source_3d_text.configure(yscrollcommand=yscroll_3d.set, xscrollcommand=xscroll_3d.set)
-
-        for src_dir in self.config_data.get("source_dirs_3d", []):
-            self.source_3d_text.insert(tk.END, src_dir + "\n")
-
-        source_3d_buttons = ttk.Frame(source_3d)
-        source_3d_buttons.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        ttk.Button(source_3d_buttons, text="添加目录", bootstyle="secondary-outline", command=self._add_source_3d).pack(
-            side=LEFT, padx=(0, 8)
-        )
-        ttk.Button(source_3d_buttons, text="删除当前行", bootstyle="secondary-outline", command=self._remove_source_3d).pack(
-            side=LEFT, padx=(0, 8)
-        )
-        ttk.Button(source_3d_buttons, text="清空全部", bootstyle="secondary-outline", command=self._clear_source_3d).pack(
-            side=LEFT
-        )
-
-        source_2d = ttk.Labelframe(main, text="2D源目录管理", padding=12)
-        source_2d.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        # ── 2D 源目录 ──
+        source_2d = ttk.Labelframe(main, text="2D源目录管理", padding=10)
+        source_2d.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
         source_2d.columnconfigure(0, weight=1)
         source_2d.rowconfigure(0, weight=1)
+        self.source_2d_text = self._build_dir_textarea(source_2d, self.config_data.get("source_dirs_2d", []))
+        self._build_dir_buttons(source_2d, self._add_source_2d, self._remove_source_2d, self._clear_source_2d)
 
-        text_outer_2d = ttk.Frame(source_2d)
-        text_outer_2d.grid(row=0, column=0, sticky="nsew")
-        text_outer_2d.columnconfigure(0, weight=1)
-        text_outer_2d.rowconfigure(0, weight=1)
-
-        self.source_2d_text = tk.Text(
-            text_outer_2d,
-            height=6,
-            wrap="none",
-            font=("Microsoft YaHei UI", 10),
-            relief="solid",
-            borderwidth=1,
-        )
-        self.source_2d_text.grid(row=0, column=0, sticky="nsew")
-        yscroll_2d = ttk.Scrollbar(text_outer_2d, orient=tk.VERTICAL, command=self.source_2d_text.yview)
-        yscroll_2d.grid(row=0, column=1, sticky="ns")
-        xscroll_2d = ttk.Scrollbar(text_outer_2d, orient=tk.HORIZONTAL, command=self.source_2d_text.xview)
-        xscroll_2d.grid(row=1, column=0, sticky="ew")
-        self.source_2d_text.configure(yscrollcommand=yscroll_2d.set, xscrollcommand=xscroll_2d.set)
-
-        for src_dir in self.config_data.get("source_dirs_2d", []):
-            self.source_2d_text.insert(tk.END, src_dir + "\n")
-
-        source_2d_buttons = ttk.Frame(source_2d)
-        source_2d_buttons.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        ttk.Button(source_2d_buttons, text="添加目录", bootstyle="secondary-outline", command=self._add_source_2d).pack(
-            side=LEFT, padx=(0, 8)
-        )
-        ttk.Button(source_2d_buttons, text="删除当前行", bootstyle="secondary-outline", command=self._remove_source_2d).pack(
-            side=LEFT, padx=(0, 8)
-        )
-        ttk.Button(source_2d_buttons, text="清空全部", bootstyle="secondary-outline", command=self._clear_source_2d).pack(
-            side=LEFT
-        )
-
-        footer = ttk.Frame(self, padding=(16, 0, 16, 16))
+        footer = ttk.Frame(self, padding=(14, 0, 14, 14))
         footer.grid(row=1, column=0, sticky="ew")
         ttk.Button(footer, text="取消", bootstyle="secondary-outline", command=self.destroy).pack(side=RIGHT)
         ttk.Button(footer, text="保存配置", bootstyle="success", command=self._save_config).pack(side=RIGHT, padx=(0, 8))
 
-    def _add_entry_row(self, parent, row: int, label: str, value: str):
+    def _add_entry(self, parent, row: int, label: str, value: str, span: int = 1):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
         entry = ttk.Entry(parent)
-        entry.grid(row=row, column=1, sticky="ew", pady=4)
+        entry.grid(row=row, column=1, columnspan=span, sticky="ew", pady=4)
         entry.insert(0, value)
         return entry
+
+    def _build_dir_textarea(self, parent, dirs):
+        outer = ttk.Frame(parent)
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+        text = tk.Text(outer, height=4, wrap="none", font=("Microsoft YaHei UI", 10), relief="solid", borderwidth=1)
+        text.grid(row=0, column=0, sticky="nsew")
+        yscroll = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=text.yview)
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll = ttk.Scrollbar(outer, orient=tk.HORIZONTAL, command=text.xview)
+        xscroll.grid(row=1, column=0, sticky="ew")
+        text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        for d in dirs:
+            text.insert(tk.END, d + "\n")
+        return text
+
+    def _build_dir_buttons(self, parent, add_cmd, rm_cmd, clear_cmd):
+        bar = ttk.Frame(parent)
+        bar.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(bar, text="添加目录", bootstyle="secondary-outline", command=add_cmd).pack(side=LEFT, padx=(0, 8))
+        ttk.Button(bar, text="删除当前行", bootstyle="secondary-outline", command=rm_cmd).pack(side=LEFT, padx=(0, 8))
+        ttk.Button(bar, text="清空全部", bootstyle="secondary-outline", command=clear_cmd).pack(side=LEFT)
 
     def _add_source_3d(self):
         dir_path = filedialog.askdirectory(title="选择3D源目录")
@@ -1250,6 +1252,11 @@ class SettingsWindow(ttk.Toplevel):
             content_2d = self.source_2d_text.get("1.0", "end").strip()
             source_dirs_2d = [line.strip() for line in content_2d.split("\n") if line.strip()] if content_2d else []
 
+            spec_base_dir = self.spec_base_dir_entry.get().strip()
+            if not spec_base_dir:
+                messagebox.showerror("错误", "仕样号文件夹不能为空")
+                return
+
             self.config_data["output_dir_name"] = self.output_entry.get().strip()
             self.config_data["original_list_filename"] = self.list_entry.get().strip()
             self.config_data["log_filename"] = self.log_entry.get().strip()
@@ -1260,6 +1267,7 @@ class SettingsWindow(ttk.Toplevel):
             self.config_data["rename_3d_files"] = self.rename_var.get()
             self.config_data["include_xt_format"] = self.include_xt_var.get()
             self.config_data["prefer_desktop"] = self.prefer_desktop_var.get()
+            self.config_data["spec_base_dir"] = spec_base_dir
             apply_runtime_paths(self.config_data)
 
             if self.on_save_callback:
@@ -1515,11 +1523,13 @@ class GunbagFetcherApp(ttk.Window):
         self.total_files = 0
         self.success_count = 0
         self.failure_count = 0
+        self.skipped_count = 0
         self.start_time = 0
         self.original_stdout = sys.stdout
         self._closing = False
 
         self.theme_var = tk.StringVar(value="yeti")
+        self.spec_mode_var = tk.BooleanVar(value=False)
         self.config_label_var = tk.StringVar(value="未选择")
         self.list_label_var = tk.StringVar(value="未选择")
         self.rename_checkbox_var = tk.BooleanVar(value=False)
@@ -1527,7 +1537,7 @@ class GunbagFetcherApp(ttk.Window):
         self.rebuild_index_var = tk.BooleanVar(value=True)
         self.prefer_desktop_var = tk.BooleanVar(value=True)
         self.progress_percent_var = tk.StringVar(value="0%")
-        self.stats_var = tk.StringVar(value="已处理: 0 | 成功: 0 | 失败: 0 | 速度: 0 文件/秒")
+        self.stats_var = tk.StringVar(value="已处理: 0 | 成功: 0 | 失败: 0 | 跳过: 0 | 速度: 0 文件/秒")
         self.status_var = tk.StringVar(value="正在初始化")
 
         self._build_ui()
@@ -1550,6 +1560,30 @@ class GunbagFetcherApp(ttk.Window):
 
         theme_bar = ttk.Frame(header)
         theme_bar.grid(row=0, column=1, rowspan=2, sticky="e")
+
+        # 模式切换：普通模式 / 仕样号模式（位于主题左侧，分段开关样式，哪边亮即哪种模式）
+        mode_frame = ttk.Frame(theme_bar)
+        mode_frame.pack(side=LEFT, padx=(0, 16))
+        ttk.Label(mode_frame, text="模式").pack(side=LEFT, padx=(0, 8))
+        self.mode_normal_radio = ttk.Radiobutton(
+            mode_frame,
+            text="普通模式",
+            value=0,
+            variable=self.spec_mode_var,
+            bootstyle="primary-outline-toolbutton",
+            command=self._on_mode_change,
+        )
+        self.mode_normal_radio.pack(side=LEFT)
+        self.mode_spec_radio = ttk.Radiobutton(
+            mode_frame,
+            text="仕样号模式",
+            value=1,
+            variable=self.spec_mode_var,
+            bootstyle="warning-outline-toolbutton",
+            command=self._on_mode_change,
+        )
+        self.mode_spec_radio.pack(side=LEFT)
+
         ttk.Label(theme_bar, text="主题").pack(side=LEFT, padx=(0, 8))
         theme_box = ttk.Combobox(
             theme_bar,
@@ -1620,13 +1654,30 @@ class GunbagFetcherApp(ttk.Window):
             bootstyle="round-toggle",
             command=self._on_rebuild_index_change,
         ).pack(anchor="w", pady=3)
-        ttk.Checkbutton(
-            option_box,
+
+        # 第四个选项槽位：固定高度容器，普通模式放开关，仕样号模式放输入框
+        # 保证切换时整个选项框高度完全一致，无视觉跳动
+        self.option_slot = ttk.Frame(option_box, height=26)
+        self.option_slot.pack_propagate(False)
+        self.option_slot.pack(fill=tk.X, pady=3)
+
+        # 普通模式槽位内容
+        self.prefer_desktop_slot = ttk.Frame(self.option_slot)
+        self.prefer_desktop_check = ttk.Checkbutton(
+            self.prefer_desktop_slot,
             text="优先保存在桌面gunbag目录",
             variable=self.prefer_desktop_var,
             bootstyle="round-toggle",
             command=self._on_prefer_desktop_change,
-        ).pack(anchor="w", pady=3)
+        )
+        self.prefer_desktop_check.pack(anchor="w")
+
+        # 仕样号模式槽位内容
+        self.spec_entry_frame = ttk.Frame(self.option_slot)
+        self._build_spec_entry(self.spec_entry_frame)
+
+        # 默认显示普通模式槽位
+        self.prefer_desktop_slot.pack(fill=tk.BOTH, expand=True)
 
 
         action_box = ttk.Labelframe(parent, text="执行", padding=12)
@@ -1717,14 +1768,14 @@ class GunbagFetcherApp(ttk.Window):
             self.config_data["rename_3d_files"] = self.rename_checkbox_var.get()
             save_configuration(self.config_path, self.config_data)
             self._clear_log()
-            self.config_data = load_configuration(self.config_path)
+            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
 
     def _on_include_xt_change(self):
         if self.config_data and self.config_path:
             self.config_data["include_xt_format"] = self.include_xt_checkbox_var.get()
             save_configuration(self.config_path, self.config_data)
             self._clear_log()
-            self.config_data = load_configuration(self.config_path)
+            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
 
     def _on_rebuild_index_change(self):
         global _INDEX_REBUILT_THIS_SESSION
@@ -1736,14 +1787,83 @@ class GunbagFetcherApp(ttk.Window):
             self.config_data["rebuild_index_before_pack"] = self.rebuild_index_var.get()
             save_configuration(self.config_path, self.config_data)
             self._clear_log()
-            self.config_data = load_configuration(self.config_path)
+            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
 
     def _on_prefer_desktop_change(self):
         if self.config_data and self.config_path:
             self.config_data["prefer_desktop"] = self.prefer_desktop_var.get()
             save_configuration(self.config_path, self.config_data)
             self._clear_log()
-            self.config_data = load_configuration(self.config_path)
+            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
+            self._update_mode_status()
+
+    def _build_spec_entry(self, parent):
+        """构建仕样号输入框（左输入框 + 右提示文字，高度适配固定槽位）。"""
+        row = ttk.Frame(parent)
+        row.pack(fill=tk.BOTH, expand=True)
+        row.columnconfigure(0, weight=0)
+        row.columnconfigure(1, weight=1)
+
+        self.spec_entry = ttk.Entry(row, width=12, font=("Microsoft YaHei UI", 8))
+        self.spec_entry.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.spec_entry.insert(0, SPEC_PLACEHOLDER)
+        self.spec_entry.configure(foreground="gray")
+        self.spec_entry.bind("<FocusIn>", lambda e: self._on_spec_focus_in())
+        self.spec_entry.bind("<FocusOut>", lambda e: self._on_spec_focus_out())
+        vcmd = (self.register(self._validate_spec_input), "%P")
+        self.spec_entry.configure(validate="key", validatecommand=vcmd)
+
+        self.spec_hint_label = ttk.Label(row, text="5位数字，作为保存目录名", bootstyle="secondary", font=("Microsoft YaHei UI", 7))
+        self.spec_hint_label.grid(row=0, column=1, sticky="w")
+
+    def _validate_spec_input(self, new_value):
+        """校验仕样号输入：允许占位符与空，否则必须为不超过5位的数字。"""
+        if new_value == "" or new_value == SPEC_PLACEHOLDER:
+            return True
+        return new_value.isdigit() and len(new_value) <= 5
+
+    def _on_spec_focus_in(self):
+        if self.spec_entry.get() == SPEC_PLACEHOLDER:
+            self.spec_entry.delete(0, tk.END)
+            self.spec_entry.configure(foreground="black")
+
+    def _on_spec_focus_out(self):
+        if not self.spec_entry.get():
+            self.spec_entry.insert(0, SPEC_PLACEHOLDER)
+            self.spec_entry.configure(foreground="gray")
+
+    def _get_spec_number(self):
+        """获取仕样号（去除占位符）；为空时返回空字符串。"""
+        val = self.spec_entry.get().strip()
+        if val == SPEC_PLACEHOLDER or not val:
+            return ""
+        return val
+
+    def _update_mode_status(self):
+        """根据当前模式刷新状态栏信息（不同模式显示不同配置信息）。"""
+        if self.spec_mode_var.get():
+            spec_base = self.config_data.get("spec_base_dir", SPEC_BASE_DIR) if self.config_data else SPEC_BASE_DIR
+            self.status_var.set(f"仕样号模式 | 仕样号目录: {spec_base}")
+        else:
+            out_dir = self.config_data.get("output_dir", "") if self.config_data else ""
+            self.status_var.set(f"普通模式 | 输出目录: {out_dir}" if out_dir else "普通模式")
+
+    def _on_mode_change(self):
+        """切换普通模式/仕样号模式：切换第四个选项的显示与状态栏信息。"""
+        if self.spec_mode_var.get():
+            self.prefer_desktop_slot.pack_forget()
+            self.spec_entry_frame.pack(fill=tk.BOTH, expand=True)
+        else:
+            self.spec_entry_frame.pack_forget()
+            self.prefer_desktop_slot.pack(fill=tk.BOTH, expand=True)
+            if self.config_data:
+                self.config_data["spec_mode"] = False
+                apply_runtime_paths(self.config_data)
+        # 已有配置时重新加载一次，让日志输出随模式刷新
+        if self.config_data and self.config_path:
+            self._clear_log()
+            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
+        self._update_mode_status()
 
     def _change_theme(self, _=None):
         self.style.theme_use(self.theme_var.get())
@@ -1770,15 +1890,17 @@ class GunbagFetcherApp(ttk.Window):
                 self.total_files = item[1]
                 self.success_count = 0
                 self.failure_count = 0
+                self.skipped_count = 0
                 self.start_time = time.time()
                 self.progress_bar.configure(value=0)
                 self.progress_percent_var.set("0%")
-                self.stats_var.set("已处理: 0 | 成功: 0 | 失败: 0 | 速度: 0 文件/秒")
+                self.stats_var.set("已处理: 0 | 成功: 0 | 失败: 0 | 跳过: 0 | 速度: 0 文件/秒")
             elif item[0] == "update":
                 current = item[1]
                 self.success_count = item[2]
                 self.failure_count = item[3]
                 speed = item[4]
+                self.skipped_count = item[5] if len(item) > 5 else 0
 
                 if self.total_files > 0:
                     percentage = (current / self.total_files) * 100
@@ -1786,7 +1908,7 @@ class GunbagFetcherApp(ttk.Window):
                     self.progress_percent_var.set(f"{int(percentage)}%")
 
                 self.stats_var.set(
-                    f"已处理: {current} | 成功: {self.success_count} | 失败: {self.failure_count} | 速度: {speed:.1f} 文件/秒"
+                    f"已处理: {current} | 成功: {self.success_count} | 失败: {self.failure_count} | 跳过: {self.skipped_count} | 速度: {speed:.1f} 文件/秒"
                 )
             elif item[0] == "complete":
                 if hasattr(sys.stdout, "flush"):
@@ -1796,6 +1918,10 @@ class GunbagFetcherApp(ttk.Window):
                 self.start_btn.configure(state="normal")
                 self.stop_btn.configure(state="disabled")
                 self.list_manager_btn.configure(state="normal")
+                self.mode_normal_radio.configure(state="normal")
+                self.mode_spec_radio.configure(state="normal")
+                if hasattr(self, "spec_entry"):
+                    self.spec_entry.configure(state="normal")
                 self.status_var.set("任务完成" if item[1] else "任务已停止或失败")
 
                 if item[1]:
@@ -1817,7 +1943,7 @@ class GunbagFetcherApp(ttk.Window):
         if os.path.exists(default_config):
             self.config_path = default_config
             self.config_label_var.set(os.path.basename(default_config))
-            self.config_data = load_configuration(default_config)
+            self.config_data = load_configuration(default_config, self.spec_mode_var.get())
 
             if self.config_data:
                 self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
@@ -1833,7 +1959,7 @@ class GunbagFetcherApp(ttk.Window):
                     self.list_manager_btn.configure(state="normal")
 
                 self.start_btn.configure(state="normal")
-                self.status_var.set("配置已加载")
+                self._update_mode_status()
         else:
             self.status_var.set("请选择配置文件")
 
@@ -1844,7 +1970,7 @@ class GunbagFetcherApp(ttk.Window):
             self._clear_log()
             self.config_path = file_path
             self.config_label_var.set(os.path.basename(file_path))
-            self.config_data = load_configuration(file_path)
+            self.config_data = load_configuration(file_path, self.spec_mode_var.get())
 
             if self.config_data:
                 self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
@@ -1860,7 +1986,7 @@ class GunbagFetcherApp(ttk.Window):
                     self.list_manager_btn.configure(state="normal")
 
                 self.start_btn.configure(state="normal")
-                self.status_var.set("配置已加载")
+                self._update_mode_status()
             else:
                 self.start_btn.configure(state="disabled")
                 self.status_var.set("配置加载失败")
@@ -1881,7 +2007,7 @@ class GunbagFetcherApp(ttk.Window):
                 self.config_data["original_list_filename"] = os.path.basename(file_path)
                 self.config_data["list_file"] = file_path
                 save_configuration(self.config_path, self.config_data)
-                self.config_data = load_configuration(self.config_path)
+                self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
                 if self.config_data:
                     self.config_data["list_file"] = file_path
                     self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
@@ -1905,6 +2031,7 @@ class GunbagFetcherApp(ttk.Window):
                 "rename_3d_files": False,
                 "include_xt_format": False,
                 "prefer_desktop": True,
+                "spec_base_dir": SPEC_BASE_DIR,
             }
 
         settings_window = SettingsWindow(self, self.config_data, self._on_settings_saved)
@@ -1916,7 +2043,7 @@ class GunbagFetcherApp(ttk.Window):
             self.config_path = os.path.join(get_root_path(), "config.ini")
 
         save_configuration(self.config_path, config_data)
-        self.config_data = load_configuration(self.config_path)
+        self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
 
         if self.config_data:
             self.rename_checkbox_var.set(self.config_data.get("rename_3d_files", False))
@@ -1933,7 +2060,7 @@ class GunbagFetcherApp(ttk.Window):
 
             self.start_btn.configure(state="normal")
             self.config_label_var.set(os.path.basename(self.config_path))
-            self.status_var.set("配置已保存")
+            self._update_mode_status()
 
     def _open_list_manager(self):
         if not self.list_file_path:
@@ -1962,8 +2089,36 @@ class GunbagFetcherApp(ttk.Window):
 
         self._clear_log()
 
-        output_dir = self.config_data.get("output_dir")
-        ensure_output_directory(output_dir)
+        spec_mode = self.spec_mode_var.get()
+        self.config_data["spec_mode"] = spec_mode
+
+        if spec_mode:
+            # 仕样号模式：校验仕样号并准备仕样号目录（不清空，追加模式）
+            spec_number = self._get_spec_number()
+            if not spec_number or not spec_number.isdigit() or len(spec_number) != 5:
+                messagebox.showerror("错误", "请输入5位数字的仕样号")
+                return
+
+            spec_base = self.config_data.get("spec_base_dir", SPEC_BASE_DIR)
+            spec_dir = os.path.join(spec_base, spec_number)
+            folder_existed = os.path.exists(spec_dir)
+            try:
+                os.makedirs(spec_dir, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("错误", f"无法创建仕样号目录:\n{spec_dir}\n\n原因: {e}")
+                return
+
+            if folder_existed:
+                print(f"📁 仕样号目录已存在，将追加打包（已存在的ZIP会跳过）: {spec_dir}")
+                messagebox.showinfo(
+                    "提示",
+                    f"仕样号目录已存在，将追加打包：\n{spec_dir}\n\n已存在的ZIP文件将被跳过。",
+                )
+            else:
+                print(f"📁 已创建仕样号目录: {spec_dir}")
+            self.config_data["output_dir"] = spec_dir
+        else:
+            ensure_output_directory(self.config_data.get("output_dir"))
 
         self.running = True
         self.start_btn.configure(state="disabled")
@@ -1971,10 +2126,14 @@ class GunbagFetcherApp(ttk.Window):
         self.open_output_btn.configure(state="disabled")
         self.view_log_btn.configure(state="disabled")
         self.list_manager_btn.configure(state="disabled")
+        self.mode_normal_radio.configure(state="disabled")
+        self.mode_spec_radio.configure(state="disabled")
+        if hasattr(self, "spec_entry"):
+            self.spec_entry.configure(state="disabled")
 
         self.progress_bar.configure(value=0)
         self.progress_percent_var.set("0%")
-        self.stats_var.set("已处理: 0 | 成功: 0 | 失败: 0 | 速度: 0 文件/秒")
+        self.stats_var.set("已处理: 0 | 成功: 0 | 失败: 0 | 跳过: 0 | 速度: 0 文件/秒")
         self.status_var.set("任务运行中")
         self.stop_event.clear()
 
@@ -1986,6 +2145,12 @@ class GunbagFetcherApp(ttk.Window):
             self.config_data["list_file"] = self.list_file_path
             if self.config_path:
                 save_configuration(self.config_path, self.config_data)
+            # save_configuration 不写 output_dir/spec_mode，重新确认仕样号模式覆盖
+            self.config_data["spec_mode"] = spec_mode
+            if spec_mode:
+                self.config_data["output_dir"] = os.path.join(
+                    self.config_data.get("spec_base_dir", SPEC_BASE_DIR), self._get_spec_number()
+                )
 
         self.worker_thread = threading.Thread(
             target=worker,
