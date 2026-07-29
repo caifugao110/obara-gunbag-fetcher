@@ -1535,7 +1535,7 @@ class GunbagFetcherApp(ttk.Window):
         self._closing = False
 
         self.theme_var = tk.StringVar(value="yeti")
-        self.spec_mode_var = tk.BooleanVar(value=False)
+        self.spec_mode_var = tk.BooleanVar(value=True)
         self.config_label_var = tk.StringVar(value="未选择")
         self.list_label_var = tk.StringVar(value="未选择")
         self.rename_checkbox_var = tk.BooleanVar(value=False)
@@ -1682,8 +1682,8 @@ class GunbagFetcherApp(ttk.Window):
         self.spec_entry_frame = ttk.Frame(self.option_slot)
         self._build_spec_entry(self.spec_entry_frame)
 
-        # 默认显示普通模式槽位
-        self.prefer_desktop_slot.pack(fill=tk.BOTH, expand=True)
+        # 默认显示仕样号模式槽位
+        self.spec_entry_frame.pack(fill=tk.BOTH, expand=True)
 
 
         action_box = ttk.Labelframe(parent, text="执行", padding=12)
@@ -1810,37 +1810,54 @@ class GunbagFetcherApp(ttk.Window):
         row.columnconfigure(0, weight=0)
         row.columnconfigure(1, weight=1)
 
-        self.spec_entry = ttk.Entry(row, width=12, font=("Microsoft YaHei UI", 8))
+        self._spec_var = tk.StringVar(value=SPEC_PLACEHOLDER)
+        self._spec_var.trace_add("write", self._on_spec_var_change)
+
+        self.spec_entry = ttk.Entry(row, width=12, font=("Microsoft YaHei UI", 8), textvariable=self._spec_var)
         self.spec_entry.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
-        self.spec_entry.insert(0, SPEC_PLACEHOLDER)
         self.spec_entry.configure(foreground="gray")
         self.spec_entry.bind("<FocusIn>", lambda e: self._on_spec_focus_in())
         self.spec_entry.bind("<FocusOut>", lambda e: self._on_spec_focus_out())
-        vcmd = (self.register(self._validate_spec_input), "%P")
-        self.spec_entry.configure(validate="key", validatecommand=vcmd)
 
-        self.spec_hint_label = ttk.Label(row, text="5位数字，作为保存目录名", bootstyle="secondary", font=("Microsoft YaHei UI", 7))
+        self.spec_hint_label = ttk.Label(row, text="只允许5位纯数字", bootstyle="danger", font=("Microsoft YaHei UI", 9, "bold"))
         self.spec_hint_label.grid(row=0, column=1, sticky="w")
 
-    def _validate_spec_input(self, new_value):
-        """校验仕样号输入：允许占位符与空，否则必须为不超过5位的数字。"""
-        if new_value == "" or new_value == SPEC_PLACEHOLDER:
-            return True
-        return new_value.isdigit() and len(new_value) <= 5
+    def _on_spec_var_change(self, *_args):
+        """输入变化时清理：只保留数字且不超过5位，防止粘贴/拖拽等绕过校验。"""
+        if getattr(self, "_spec_sanitizing", False):
+            return
+        val = self._spec_var.get()
+        if val == SPEC_PLACEHOLDER:
+            return
+        filtered = "".join(c for c in val if c.isdigit())[:5]
+        if filtered != val:
+            self._spec_sanitizing = True
+            self._spec_var.set(filtered)
+            self._spec_sanitizing = False
+            self.spec_entry.icursor(tk.END)
 
     def _on_spec_focus_in(self):
-        if self.spec_entry.get() == SPEC_PLACEHOLDER:
-            self.spec_entry.delete(0, tk.END)
+        if self._spec_var.get() == SPEC_PLACEHOLDER:
+            self._spec_sanitizing = True
+            self._spec_var.set("")
+            self._spec_sanitizing = False
             self.spec_entry.configure(foreground="black")
 
     def _on_spec_focus_out(self):
-        if not self.spec_entry.get():
-            self.spec_entry.insert(0, SPEC_PLACEHOLDER)
+        val = self._spec_var.get()
+        if not val:
+            self._spec_sanitizing = True
+            self._spec_var.set(SPEC_PLACEHOLDER)
+            self._spec_sanitizing = False
             self.spec_entry.configure(foreground="gray")
+        elif len(val) != 5:
+            self.spec_entry.configure(foreground="red")
+        else:
+            self.spec_entry.configure(foreground="black")
 
     def _get_spec_number(self):
         """获取仕样号（去除占位符）；为空时返回空字符串。"""
-        val = self.spec_entry.get().strip()
+        val = self._spec_var.get().strip()
         if val == SPEC_PLACEHOLDER or not val:
             return ""
         return val
@@ -2102,7 +2119,7 @@ class GunbagFetcherApp(ttk.Window):
             # 仕样号模式：校验仕样号并准备仕样号目录（不清空，追加模式）
             spec_number = self._get_spec_number()
             if not spec_number or not spec_number.isdigit() or len(spec_number) != 5:
-                messagebox.showerror("错误", "请输入5位数字的仕样号")
+                messagebox.showerror("错误", "请输入5位纯数字的仕样号")
                 return
 
             spec_base = self.config_data.get("spec_base_dir", SPEC_BASE_DIR)

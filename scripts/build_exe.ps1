@@ -53,13 +53,17 @@ Write-Info "Creating virtual environment..."
 & $SystemPython -m venv $VenvDir
 if ($LASTEXITCODE -ne 0) { throw "Failed to create virtual environment" }
 
+# Wait for virtual environment to be fully initialized
+Start-Sleep -Seconds 2
+
 # Step 2: Install dependencies
 $pythonExe = Join-Path $VenvDir "Scripts\python.exe"
 if (-not (Test-Path $pythonExe)) { throw "venv python.exe not found: $pythonExe" }
 
-Write-Info "Upgrading pip..."
-& $pythonExe -m pip install --upgrade pip
-if ($LASTEXITCODE -ne 0) { throw "Failed to upgrade pip" }
+# Verify virtual environment is working
+Write-Info "Verifying virtual environment..."
+& $pythonExe --version
+if ($LASTEXITCODE -ne 0) { throw "Virtual environment verification failed" }
 
 Write-Info "Installing project dependencies..."
 & $pythonExe -m pip install -r (Join-Path $ProjectDir "requirements.txt")
