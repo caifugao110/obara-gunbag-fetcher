@@ -81,6 +81,21 @@
 - **按需重建**：关闭重建后，复用上次索引结果，加速启动
 - **智能失效**：源目录变更时自动使缓存失效
 - **多线程扫描**：2D 扫描采用 BFS + 多线程工作池，3D 扫描使用多线程并行
+- **启动时后台索引重建**：开启 `rebuild_index_on_startup` 后，程序启动时自动在后台线程静默重建 2D/3D 索引，完成后原子覆盖缓存，不阻塞界面操作
+  - 构建期间使用临时变量存储结果，全部完成后一次性写入磁盘缓存和会话缓存
+  - 防止用户在建索引期间开始打包导致使用不完整的索引
+  - 重建完成后状态栏会显示索引更新时间
+
+### 后台索引重建机制
+
+程序启动时（若 `rebuild_index_on_startup = true`），会在后台线程中依次：
+
+1. 构建 2D 索引（静默模式，不打印进度）
+2. 构建 3D 索引（静默模式）
+3. 全部完成后原子写入磁盘缓存（`.gunbag_cache.pkl`）
+4. 通过回调通知 UI 更新索引时间戳
+
+整个过程不阻塞主线程，用户可以在重建期间继续操作界面（但建议等重建完成后再开始打包，以使用最新的索引）。
 
 ### 结果与日志
 
@@ -92,18 +107,22 @@
 
 - 顶部分别显示标题、模式切换（普通/仕样号）、主题切换、GitHub 链接、使用说明、更新日志、关于
 - **模式切换**：顶部工具栏的分段开关，一键切换普通模式与仕样号模式
-- **主题切换**：内置多种 ttkbootstrap 主题，实时切换
+- **主题切换**：内置多种 ttkbootstrap 主题，实时切换（默认主题：`yeti`）
 - 左侧面板：
   - **文件设置**：选择配置文件和原始清单文件
   - **选项**：3D 重命名开关、XT 格式包含开关、索引重建开关；第四个选项槽位根据模式动态切换（普通模式显示「优先保存在桌面」开关，仕样号模式显示 5 位数字输入框）
-  - **执行**：开始批量打包、停止处理、配置管理、清单管理、打开输出目录、查看日志、清空日志框
+  - **执行**：开始批量打包、停止处理、配置管理、图号管理、打开输出目录、查看日志、清空日志框
 - 右侧面板：处理进度条（含百分比）、统计信息（已处理/成功/失败/跳过/速度）、实时日志显示
-- 底部状态栏：当前运行状态（初始化/配置已加载/任务运行中/任务完成等），仕样号模式下显示仕样号目录路径
+- 底部状态栏：
+  - 左侧：当前运行状态（初始化/配置已加载/任务运行中/任务完成等），仕样号模式下显示仕样号目录路径
+  - 右侧：索引更新时间戳、本机 IP 地址、计算机主机名
 - **自动加载**：启动时自动加载 `config.ini` 和默认清单文件
 - **在线更新日志**：从 Gitee Commits API 实时获取最近 5 条版本记录
 - **在线帮助文档**：内置使用说明窗口，从 Gitee 加载 README.md 内容
 - **关于对话框**：显示项目名称、版本、作者、协议、项目链接
 - **窗口关闭保护**：处理中关闭窗口会弹出确认对话框，防止误操作
+- **配置管理二次确认**：修改公共配置文件时弹出"这是公共配置文件，修改需要管理员许可"二次确认
+- **仕样号输入框实时校验**：只允许 5 位纯数字，非法字符自动过滤，超长自动截断
 
 ## 快速开始
 
@@ -144,9 +163,11 @@ dist\obara-gunbag-fetcher.exe
 构建脚本会自动：
 1. 创建临时虚拟环境 `.venv`
 2. 升级 pip 并安装项目依赖 + PyInstaller
-3. 调用 PyInstaller 打包为单文件窗口程序（`--onefile --windowed`），图标嵌入 exe
-4. 复制 `config.ini` 和清单文件到 `dist/`
-5. 清理临时文件（可通过 `-SkipCleanup` 参数跳过）
+3. 从 `pyproject.toml` 自动生成 Windows 版本信息（产品名、版本号、公司名、版权等）
+4. 调用 PyInstaller 打包为单文件窗口程序（`--onefile --windowed`），图标嵌入 exe
+5. 复制 `config.ini` 和清单文件到 `dist/`
+6. 清理 `dist/` 下残留的 `assets/` 文件夹
+7. 清理临时文件（可通过 `-SkipCleanup` 参数跳过）
 
 ### PyInstaller 打包参数
 
@@ -155,12 +176,31 @@ dist\obara-gunbag-fetcher.exe
 | `--name` | `obara-gunbag-fetcher` | 输出的 exe 名称 |
 | `--onefile` | — | 打包为单文件 |
 | `--windowed` | — | 不显示控制台窗口 |
+| `--noupx` | — | 不使用 UPX 压缩（避免杀毒软件误报） |
+| `--clean` | — | 清理临时缓存 |
+| `--noconfirm` | — | 不提示确认覆盖 |
 | `--add-data` | `assets;assets` | 将图标等资源嵌入可执行程序 |
 | `--add-data` | `pyproject.toml;.` | 嵌入项目元数据 |
 | `--add-data` | `config.ini;.` | 嵌入默认配置文件 |
 | `--icon` | `assets/app.ico` | 设置应用图标 |
 | `--collect-data` | `ttkbootstrap` | 收集 ttkbootstrap 主题数据 |
 | `--collect-all` | `requests` | 收集 requests 模块全部内容 |
+| `--collect-all` | `urllib3` | 收集 urllib3 模块全部内容 |
+| `--hidden-import` | `requests, urllib3, charset_normalizer, idna, certifi` | 显式声明隐式导入的子模块 |
+| `--version-file` | 临时生成 | 从 pyproject.toml 动态生成的 Windows 版本信息 |
+
+### Windows 版本信息
+
+构建脚本会从 `pyproject.toml` 读取项目元数据，自动生成 Windows 可执行文件的版本信息资源，包含：
+
+- 产品名称、文件描述
+- 文件版本（如 `1.0.8.0`）
+- 公司/作者名
+- 版权声明（`Copyright (C) 2026 Tobin. All rights reserved.`）
+- 原始文件名（`obara-gunbag-fetcher.exe`）
+- 产品版本
+
+这些信息在 Windows 资源管理器的"属性 → 详细信息"中可见。
 
 ### 构建选项
 
@@ -173,9 +213,12 @@ dist\obara-gunbag-fetcher.exe
 
 项目已配置 GitHub Actions CI/CD（`.github/workflows/release.yml`），在 push 到 `master` 分支时自动：
 1. 读取 `pyproject.toml` 中的版本号
-2. 创建 Git 标签并推送到远程
-3. 在 Windows runner 上调用构建脚本生成 exe
-4. 创建 GitHub Release 并上传 `obara-gunbag-fetcher.exe` 产物
+2. 使用 `git log -1` 提取最新提交信息作为 Release 正文
+3. 创建 Git 标签（格式 `V{version}`）并推送到远程
+4. 在 `windows-latest` runner 上使用 Python 3.11 调用 PyInstaller 生成 exe
+5. 创建 GitHub Release 并上传 `obara-gunbag-fetcher.exe` 产物
+
+> **注意**：GitHub Actions 使用简化版 PyInstaller 参数（不含 `--noupx`、版本信息文件、`--clean`、`--noconfirm`），与本地构建脚本略有差异。本地构建脚本（`scripts/build_exe.ps1`）功能更完整。
 
 > **注意**：运行时更新日志和帮助文档从 Gitee 获取（参见下方"服务端说明"），构建产物托管在 GitHub Releases。
 
@@ -193,21 +236,24 @@ retry_attempts = 3
 rename_3d_files = false
 include_xt_format = false
 rebuild_index_before_pack = false
+rebuild_index_on_startup = true
+log_on_desktop = true
+list_on_desktop = true
 prefer_desktop = true
-spec_base_dir = \\192.168.160.70\文件中转\临时文件\00枪衣数模
+spec_base_dir = \\SERVER\Share\临时文件\00枪衣数模
 
 [3D_SourceDirectories]
-source_1 = \\192.168.160.2\生产管理部3d\3D 资料\设计一课3D资料\03-SV GUN STEP
-source_2 = \\192.168.160.2\生产管理部3d\3D 资料\吉利标准化\07吉利库STEP
-source_3 = \\192.168.160.2\生产管理部3d\3D 资料\设计一课3D资料\01-SV GUN ASSY\13-PSA\00-STP
-source_4 = \\192.168.160.2\生产管理部\制造技术一课\checkc
+source_1 = \\SERVER\Share\3D资料\设计一课3D资料\03-SV GUN STEP
+source_2 = \\SERVER\Share\3D资料\吉利标准化\07吉利库STEP
+source_3 = \\SERVER\Share\3D资料\设计一课3D资料\01-SV GUN ASSY\13-PSA\00-STP
+source_4 = \\SERVER\Share\制造技术一课\checkc
 ...
 
 [2D_SourceDirectories]
-source_1 = \\192.168.160.2\生产管理部\2D\已导入PDM\二课
-source_2 = \\192.168.160.2\生产管理部\2D\已导入PDM\上海
-source_3 = \\192.168.160.2\生产管理部\2D\已导入PDM\一课
-source_4 = \\192.168.160.2\生产管理部\制造技术一课\checkc
+source_1 = \\SERVER\Share\2D\已导入PDM\二课
+source_2 = \\SERVER\Share\2D\已导入PDM\上海
+source_3 = \\SERVER\Share\2D\已导入PDM\一课
+source_4 = \\SERVER\Share\制造技术一课\checkc
 ```
 
 ### 配置项说明
@@ -223,9 +269,12 @@ source_4 = \\192.168.160.2\生产管理部\制造技术一课\checkc
 | `retry_attempts` | int | 打包失败重试次数 | `3` |
 | `rename_3d_files` | bool | 是否按清单重命名 3D 文件 | `false` |
 | `include_xt_format` | bool | 是否包含 XT 格式文件 | `false` |
-| `rebuild_index_before_pack` | bool | 打包前是否重建索引 | `true` |
+| `rebuild_index_before_pack` | bool | 打包前是否重建索引（开启时跳过缓存强制全量扫描） | `true` |
+| `rebuild_index_on_startup` | bool | 启动时是否在后台静默重建索引，完成后自动覆盖缓存 | `true` |
+| `log_on_desktop` | bool | 日志文件是否保存到桌面（开启时日志输出至桌面，否则保存到程序目录） | `true` |
+| `list_on_desktop` | bool | 图号清单编辑保存时是否保存到桌面（开启时清单管理保存到桌面） | `true` |
 | `prefer_desktop` | bool | 优先将输出保存到桌面 gunbag 目录（普通模式下生效） | `true` |
-| `spec_base_dir` | string | 仕样号模式下的根目录，按仕样号创建子目录 | `\\192.168.160.70\文件中转\临时文件\00枪衣数模` |
+| `spec_base_dir` | string | 仕样号模式下的根目录，按仕样号创建子目录 | `\\SERVER\Share\临时文件\00枪衣数模` |
 | `3D_SourceDirectories.source_*` | string | 3D 源目录（完整 UNC 或本地路径） | — |
 | `2D_SourceDirectories.source_*` | string | 2D 源目录（完整 UNC 或本地路径） | — |
 
@@ -237,8 +286,13 @@ source_4 = \\192.168.160.2\生产管理部\制造技术一课\checkc
 - **包含 XT 格式 3D 文件** — 切换开关立即保存
 - **重建 2D/3D 目录索引** — 切换开关立即保存，关闭时清空缓存以加速下次启动
 - **优先保存在桌面 gunbag 目录** — 切换开关立即保存，开启后输出目录切换至桌面
+- **启动时后台重建索引** — 在"配置管理"中修改，下次启动时生效
+- **日志文件保存在桌面** — 在"配置管理"中修改，下次打包时生效
+- **图号清单保存在桌面** — 在"配置管理"中修改，图号管理保存时使用
 
 通过"配置管理"按钮保存的变更也会立即写入 `config.ini`，无需重启程序。
+
+> **注意**：配置管理窗口会弹出二次确认提示（"这是公共配置文件，修改需要管理员许可"），防止误操作。
 
 ### 进程关闭行为
 
@@ -265,7 +319,7 @@ SRTX-2C14693L
    - `config.ini` 配置文件
    - `Original file list.txt` 清单文件（若存在）
 
-3. **选择模式** — 确认顶部"普通模式"被选中（默认）。
+3. **选择模式** — 确认顶部模式切换为"普通模式"（默认启动时为仕样号模式，需手动切换）。
 
 4. **配置检查** — 确认源目录路径正确，可通过"配置管理"按钮进行增删改。
 
@@ -277,7 +331,7 @@ SRTX-2C14693L
 
 ### 仕样号模式
 
-1. **切换模式** — 点击顶部工具栏的「仕样号模式」单选按钮。
+1. **切换模式** — 默认启动即为「仕样号模式」，确认顶部工具栏的「仕样号模式」被选中。
 
 2. **输入仕样号** — 在左侧面板「选项」区域的仕样号输入框中输入 5 位数字（如 `00123`）。
 
@@ -286,7 +340,7 @@ SRTX-2C14693L
 4. **准备清单文件** — 与普通模式相同，准备 `.csv` 或 `.txt` 文件。
 
 5. **开始打包** — 点击"开始批量打包"按钮。程序会：
-   - 自动创建仕样号子目录（如 `\\192.168.160.70\文件中转\临时文件\00枪衣数模\00123\`）
+   - 自动创建仕样号子目录（如 `\\SERVER\Share\临时文件\00枪衣数模\00123\`）
    - 若目录已存在，则追加打包（已存在的 ZIP 自动跳过）
    - 不清空目录，保留历史打包记录
 
@@ -482,8 +536,30 @@ SRTX-2C14701L.zip
 
 - 索引缓存文件为程序根目录下的 `.gunbag_cache.pkl`
 - 同时存储 2D 和 3D 索引，源目录变更时缓存自动失效
+- 缓存含版本号校验（`_CACHE_VERSION = 2`），版本不兼容时自动全量重建
+- 写入使用临时文件 + `os.replace()` 原子替换，防止半写损坏
 - 如需强制重建，可在界面勾选"重建 2D/3D 索引"选项
 - 可手动删除该缓存文件以强制全量扫描
+
+### 启动时后台索引重建是什么？
+
+程序启动时若 `rebuild_index_on_startup = true`，会在后台线程静默重建 2D/3D 索引。特点：
+
+- **不阻塞界面**：重建过程在后台线程进行，用户可以继续操作
+- **原子覆盖**：全部构建完成后一次性写入缓存，防止使用不完整索引
+- **静默模式**：不打印扫描进度日志
+- **状态栏提示**：完成后状态栏会显示索引更新时间
+- 可在"配置管理"中关闭此功能，以加速启动（代价是索引可能不是最新的）
+
+### "重建索引"选项和启动时后台重建有什么区别？
+
+| 特性 | 启动时后台重建 | 打包前重建 |
+|---|---|---|
+| 触发时机 | 程序启动时 | 每次点击"开始批量打包"时 |
+| 运行方式 | 后台线程，不阻塞界面 | 同步，打包前必须等待完成 |
+| 静默模式 | 是（不打印进度） | 否（打印扫描进度） |
+| 缓存策略 | 强制跳过所有缓存 | 首次打包跳过缓存，同会话后续打包复用缓存 |
+| 配置项 | `rebuild_index_on_startup` | `rebuild_index_before_pack` |
 
 ### 仕样号模式使用说明
 
@@ -520,17 +596,20 @@ SRTX-2C14701L.zip
 
 ```
 obara-gunbag-fetcher/
-├── app.py                  # GUI 主程序，包含全部核心逻辑
+├── app.py                  # GUI 主程序，包含全部核心逻辑（单文件约 2500 行）
 ├── assets/
 │   └── app.ico             # 应用图标
 ├── scripts/
-│   └── build_exe.ps1       # Windows 构建脚本
+│   └── build_exe.ps1       # Windows 构建脚本（含版本信息生成）
 ├── .github/
 │   └── workflows/
 │       └── release.yml     # GitHub Actions 自动构建发布
+├── .trae/
+│   └── rules/
+│       └── git-commit-message.md  # Git 提交信息规范
 ├── .gitignore
 ├── LICENSE
-├── README.md               # 项目说明文档
+├── README.md               # 项目说明文档（同时作为应用内帮助文档）
 ├── pyproject.toml          # 项目元数据与依赖配置
 ├── requirements.txt        # pip 依赖清单
 ├── config.ini              # 用户配置文件
@@ -542,15 +621,16 @@ obara-gunbag-fetcher/
 
 | 文件/目录 | 说明 |
 |---|---|
-| `app.py` | 主程序入口，包含 GUI 界面、配置管理、文件扫描、打包处理等全部逻辑 |
+| `app.py` | 主程序入口，包含 GUI 界面、配置管理、文件扫描、打包处理等全部逻辑（单文件约 2500 行） |
 | `assets/app.ico` | 应用程序图标 |
-| `scripts/build_exe.ps1` | Windows PowerShell 构建脚本，自动创建虚拟环境并调用 PyInstaller |
-| `.github/workflows/release.yml` | GitHub Actions CI/CD 配置，自动化构建和发布 |
-| `pyproject.toml` | 项目元数据（名称、版本、作者、依赖等），同时供 `app.py` 读取版本信息 |
-| `requirements.txt` | Python 依赖清单 |
+| `scripts/build_exe.ps1` | Windows PowerShell 构建脚本，自动创建虚拟环境、生成 Windows 版本信息、调用 PyInstaller |
+| `.github/workflows/release.yml` | GitHub Actions CI/CD 配置，自动化构建和发布（Python 3.11 + windows-latest） |
+| `.trae/rules/` | AI 辅助开发规则目录，含 Git 提交信息规范 |
+| `pyproject.toml` | 项目元数据（名称、版本、作者、依赖等），同时供 `app.py` 读取版本信息和构建脚本生成版本资源 |
+| `requirements.txt` | Python 依赖清单（`ttkbootstrap>=1.10.1`、`requests>=2.31.0`） |
 | `config.ini` | 用户配置文件，包含路径、性能参数、源目录、仕样号目录等 |
 | `Original file list.txt` | 默认的待处理文件清单 |
-| `.gunbag_cache.pkl` | 运行时自动生成的 2D/3D 索引缓存文件 |
+| `.gunbag_cache.pkl` | 运行时自动生成的 2D/3D 索引缓存文件（含版本号校验，不兼容时自动重建） |
 
 ## 核心模块（开发者参考）
 
@@ -561,6 +641,14 @@ obara-gunbag-fetcher/
 - `build_3d_index()`：多线程并行扫描 3D 源目录，构建 STEP/XT 文件索引
 - `build_2d_index()`：带三级缓存的 2D 文件索引构建（会话缓存 → 磁盘缓存 → 全量扫描）
 - `_scan_2d_tree_parallel()`：BFS 多线程工作池扫描 2D 目录树
+- `rebuild_index_on_startup_background()`：启动时后台静默重建 2D/3D 索引，完成后原子覆盖缓存
+
+### 缓存管理
+
+- `_load_disk_cache()` / `_save_disk_cache()`：磁盘缓存（`.gunbag_cache.pkl`）读写，含版本校验
+- `_load_2d_disk_cache()` / `_save_2d_disk_cache()`：2D 索引独立缓存读写
+- `_load_3d_disk_cache()` / `_save_3d_disk_cache()`：3D 索引独立缓存读写
+- 磁盘缓存使用 `os.replace()` 原子替换，防止半写损坏
 
 ### 文件匹配
 
@@ -579,14 +667,16 @@ obara-gunbag-fetcher/
 - `load_configuration()`：加载 `config.ini`，支持普通模式和仕样号模式两种上下文
 - `save_configuration()`：保存配置到 `config.ini`
 - `apply_runtime_paths()`：根据当前模式和 `prefer_desktop` 设置计算运行时路径
+- `load_project_metadata()`：从 `pyproject.toml` 读取项目元数据（含 tomllib 解析和正则回退两种方式）
 
 ### GUI 组件
 
-- `GunbagFetcherApp`：主应用窗口，含模式切换（普通/仕样号）
-- `SettingsWindow`：配置管理窗口，左右分栏展示普通模式与仕样号模式设置
-- `ListManagerWindow`：清单管理窗口
-- `UpdateLogWindow`：更新日志查看窗口
-- `HelpWindow`：在线帮助文档窗口
+- `GunbagFetcherApp`：主应用窗口，含模式切换（普通/仕样号）、主题切换、文件选择、选项控制、进度显示、日志显示
+- `SettingsWindow`：配置管理窗口，单页布局含通用设置（线程数、重试次数、复选框选项）+ 普通/仕样号模式分区 + 3D/2D 源目录管理，保存时弹出二次确认
+- `ListManagerWindow`：图号管理窗口，支持文本编辑、保存到桌面或原路径
+- `UpdateLogWindow`：更新日志查看窗口，从 Gitee Commits API 获取最近 5 条版本记录
+- `HelpWindow`：在线帮助文档窗口，从 Gitee 加载 README.md 内容
+- `StdoutRedirector`：stdout 重定向器，将 print 输出重定向到 GUI 日志队列
 
 ### 仕样号模式相关
 
@@ -594,6 +684,17 @@ obara-gunbag-fetcher/
 - `SPEC_PLACEHOLDER`：仕样号输入框占位提示
 - `_get_spec_number()`：获取并校验当前输入的仕样号
 - 仕样号模式下 `process_item()` 会检查 ZIP 是否已存在，存在则跳过
+- 仕样号模式启动时校验 5 位纯数字，不合法则阻止打包
+- 仕样号模式下输出目录不清空，追加打包
+
+### 全局缓存与状态变量
+
+- `_2D_INDEX_CACHE`：会话级 2D 索引缓存（`cache_key → (index, dwg_count, pdf_count, scan_dirs)`）
+- `_3D_INDEX_CACHE`：会话级 3D 索引缓存（`cache_key → index`）
+- `_INDEX_REBUILT_THIS_SESSION`：标记本会话是否已重建索引，用于跳过重复重建
+- `_STARTUP_INDEX_REBUILDING`：标记启动时后台重建是否正在进行
+- `_STARTUP_INDEX_REBUILT`：标记启动时后台重建是否已完成
+- `log_queue` / `progress_queue`：日志队列和进度队列，用于后台线程与 GUI 线程通信
 
 ## 服务端说明
 

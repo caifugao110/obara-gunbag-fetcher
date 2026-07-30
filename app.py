@@ -7,6 +7,7 @@ import pickle
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ import webbrowser
 import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 import tkinter as tk
@@ -204,7 +206,7 @@ def clean_filename(name):
     return name.lower()
 
 
-def load_configuration(config_path, spec_mode=False):
+def load_configuration(config_path, spec_mode=False, silent=False):
     """加载配置文件。"""
     if not os.path.exists(config_path):
         print(f"🔥 配置文件不存在: {config_path}")
@@ -222,6 +224,9 @@ def load_configuration(config_path, spec_mode=False):
         rename_option = config.getboolean("Settings", "rename_3d_files", fallback=False)
         include_xt = config.getboolean("Settings", "include_xt_format", fallback=False)
         rebuild_index = config.getboolean("Settings", "rebuild_index_before_pack", fallback=True)
+        rebuild_index_on_startup = config.getboolean("Settings", "rebuild_index_on_startup", fallback=True)
+        log_on_desktop = config.getboolean("Settings", "log_on_desktop", fallback=True)
+        list_on_desktop = config.getboolean("Settings", "list_on_desktop", fallback=True)
 
         root_path = get_root_path()
         source_dirs_3d = []
@@ -238,33 +243,38 @@ def load_configuration(config_path, spec_mode=False):
 
         prefer_desktop = config.getboolean("Settings", "prefer_desktop", fallback=True)
         spec_base_dir = config.get("Settings", "spec_base_dir", fallback=SPEC_BASE_DIR)
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
 
         if prefer_desktop:
-            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
             output_dir = os.path.join(desktop, output_dir_name)
         else:
             output_dir = os.path.join(root_path, output_dir_name)
+        # 图号清单首次加载始终从程序同目录查找；仅在图号管理中保存过才会存到桌面
         list_file = os.path.join(root_path, original_list_filename)
-        log_file = os.path.join(root_path, log_filename)
+        if log_on_desktop:
+            log_file = os.path.join(desktop, log_filename)
+        else:
+            log_file = os.path.join(root_path, log_filename)
 
         max_workers = config.getint("Settings", "max_workers", fallback=12)
         retry_attempts = config.getint("Settings", "retry_attempts", fallback=3)
 
-        mode_label = "仕样号模式" if spec_mode else "普通模式"
-        print(f"✅ 配置加载成功（{mode_label}）:")
-        print(f"   3D源目录数量: {len(source_dirs_3d)}")
-        print(f"   2D源目录数量: {len(source_dirs_2d)}")
-        print(f"   待处理列表: {list_file}")
-        print(f"   日志文件: {log_file}")
-        print(f"   最大线程数: {max_workers}")
-        print(f"   重试次数: {retry_attempts}")
-        print(f"   3D按清单重命名: {'是' if rename_option else '否'}")
-        print(f"   包含 XT 格式: {'是' if include_xt else '否'}")
-        print(f"   打包前重建索引: {'是' if rebuild_index else '否'}")
-        if spec_mode:
-            print(f"   仕样号文件夹: {spec_base_dir}")
-        else:
-            print(f"   输出目录: {output_dir}")
+        if not silent:
+            mode_label = "仕样号模式" if spec_mode else "普通模式"
+            print(f"✅ 配置加载成功（{mode_label}）:")
+            print(f"   3D源目录数量: {len(source_dirs_3d)}")
+            print(f"   2D源目录数量: {len(source_dirs_2d)}")
+            print(f"   待处理列表: {list_file}")
+            print(f"   日志文件: {log_file}")
+            print(f"   最大线程数: {max_workers}")
+            print(f"   重试次数: {retry_attempts}")
+            print(f"   3D按清单重命名: {'是' if rename_option else '否'}")
+            print(f"   包含 XT 格式: {'是' if include_xt else '否'}")
+            print(f"   打包前重建索引: {'是' if rebuild_index else '否'}")
+            if spec_mode:
+                print(f"   仕样号文件夹: {spec_base_dir}")
+            else:
+                print(f"   输出目录: {output_dir}")
 
         return {
             "source_dirs_3d": source_dirs_3d,
@@ -281,6 +291,9 @@ def load_configuration(config_path, spec_mode=False):
             "rename_3d_files": rename_option,
             "include_xt_format": include_xt,
             "rebuild_index_before_pack": rebuild_index,
+            "rebuild_index_on_startup": rebuild_index_on_startup,
+            "log_on_desktop": log_on_desktop,
+            "list_on_desktop": list_on_desktop,
             "prefer_desktop": prefer_desktop,
             "spec_base_dir": spec_base_dir,
         }
@@ -290,7 +303,7 @@ def load_configuration(config_path, spec_mode=False):
         return None
 
 
-def save_configuration(config_path, config_data):
+def save_configuration(config_path, config_data, show_log=True):
     """保存配置文件。"""
     try:
         config = configparser.ConfigParser()
@@ -308,6 +321,9 @@ def save_configuration(config_path, config_data):
             "rename_3d_files": str(config_data.get("rename_3d_files", False)).lower(),
             "include_xt_format": str(config_data.get("include_xt_format", False)).lower(),
             "rebuild_index_before_pack": str(config_data.get("rebuild_index_before_pack", True)).lower(),
+            "rebuild_index_on_startup": str(config_data.get("rebuild_index_on_startup", True)).lower(),
+            "log_on_desktop": str(config_data.get("log_on_desktop", True)).lower(),
+            "list_on_desktop": str(config_data.get("list_on_desktop", True)).lower(),
             "prefer_desktop": str(config_data.get("prefer_desktop", True)).lower(),
             "spec_base_dir": config_data.get("spec_base_dir", SPEC_BASE_DIR),
         }
@@ -323,7 +339,8 @@ def save_configuration(config_path, config_data):
         with open(config_path, "w", encoding="utf-8") as f:
             config.write(f)
 
-        print(f"✅ 配置已保存至: {config_path}")
+        if show_log:
+            print(f"✅ 配置已保存至: {config_path}")
         return True
     except Exception as e:
         print(f"🔥 配置保存失败: {str(e)}")
@@ -333,13 +350,17 @@ def save_configuration(config_path, config_data):
 def apply_runtime_paths(config_data):
     """根据当前程序根目录补齐运行时使用的文件路径。"""
     root_path = get_root_path()
+    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
     if config_data.get("prefer_desktop", True):
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         config_data["output_dir"] = os.path.join(desktop, config_data.get("output_dir_name", "output"))
     else:
         config_data["output_dir"] = os.path.join(root_path, config_data.get("output_dir_name", "output"))
+    # 图号清单首次加载始终从程序同目录查找；仅在图号管理中保存过才会存到桌面
     config_data["list_file"] = os.path.join(root_path, config_data.get("original_list_filename", "Original file list.txt"))
-    config_data["log_file"] = os.path.join(root_path, config_data.get("log_filename", "log.csv"))
+    if config_data.get("log_on_desktop", True):
+        config_data["log_file"] = os.path.join(desktop, config_data.get("log_filename", "log.csv"))
+    else:
+        config_data["log_file"] = os.path.join(root_path, config_data.get("log_filename", "log.csv"))
     return config_data
 
 
@@ -410,7 +431,8 @@ def build_3d_index(source_dirs, include_xt=False, max_workers=12, force_refresh=
     # 1. 会话内存缓存
     if not force_refresh and cache_key in _3D_INDEX_CACHE:
         index = _3D_INDEX_CACHE[cache_key]
-        print(f"✅ 3D索引命中会话缓存: {len(index)} 个前缀组（本会话已扫描过）")
+        file_count = sum(len(v) for v in index.values())
+        print(f"✅ 3D索引命中会话缓存: {file_count} 个文件（本会话已扫描过）")
         return index
 
     # 2. 磁盘缓存（跨会话，源目录不变即命中）
@@ -418,7 +440,8 @@ def build_3d_index(source_dirs, include_xt=False, max_workers=12, force_refresh=
         disk_index = _load_3d_disk_cache(cache_key)
         if disk_index is not None:
             _3D_INDEX_CACHE[cache_key] = disk_index
-            print(f"✅ 3D索引命中磁盘缓存: {len(disk_index)} 个前缀组")
+            file_count = sum(len(v) for v in disk_index.values())
+            print(f"✅ 3D索引命中磁盘缓存: {file_count} 个文件")
             return disk_index
 
     # 3. 全量扫描
@@ -466,6 +489,8 @@ _2D_INDEX_CACHE: dict[tuple, tuple] = {}
 _3D_INDEX_CACHE: dict[tuple, dict] = {}
 
 _INDEX_REBUILT_THIS_SESSION = False
+_STARTUP_INDEX_REBUILDING = False
+_STARTUP_INDEX_REBUILT = False
 
 
 def _scan_2d_dir_one(current):
@@ -546,9 +571,10 @@ def _scan_2d_worker_loop(dir_queue, fragments, state, cv):
             cv.notify_all()
 
 
-def _scan_2d_tree_parallel(source_dirs, max_workers):
+def _scan_2d_tree_parallel(source_dirs, max_workers, silent=False):
     """并行 BFS 扫描所有源目录树（子目录级并行，自动负载均衡）。
     返回 (index, scanned_dirs, dwg_count, pdf_count)。
+    silent=True 时不打印扫描进度（用于后台静默重建）。
     """
     dir_queue = queue.Queue()
     for src in source_dirs:
@@ -572,7 +598,7 @@ def _scan_2d_tree_parallel(source_dirs, max_workers):
     while any(t.is_alive() for t in threads):
         time.sleep(0.2)
         now = time.time()
-        if now - last_report >= 1.0:
+        if not silent and now - last_report >= 1.0:
             last_report = now
             with cv:
                 d = state["scanned_dirs"]
@@ -692,12 +718,105 @@ def _save_3d_disk_cache(cache_key, index):
     _save_disk_cache(disk)
 
 
+def _build_2d_index_silent(source_dirs, max_workers=12):
+    """静默构建2D索引（不写会话缓存，仅扫描并返回结果，不打印进度）。"""
+    cache_key = tuple(sorted(source_dirs))
+    index, scan_dirs, dwg_count, pdf_count = _scan_2d_tree_parallel(source_dirs, max_workers, silent=True)
+    return cache_key, index, dwg_count, pdf_count, scan_dirs
+
+
+def _build_3d_index_silent(source_dirs, include_xt=False, max_workers=12):
+    """静默构建3D索引（不写会话缓存，仅扫描并返回结果）。"""
+    cache_key = (tuple(sorted(source_dirs)), include_xt)
+    all_results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_scan_3d_dir_fast, src, include_xt): src for src in source_dirs}
+        for future in as_completed(futures):
+            try:
+                results = future.result()
+                all_results.extend(results)
+            except Exception:
+                pass
+    index = {}
+    for name, root in all_results:
+        base_name = os.path.splitext(name)[0]
+        clean_base = clean_filename(base_name)
+        prefix_key = clean_base[:4] if len(clean_base) >= 4 else clean_base
+        if prefix_key not in index:
+            index[prefix_key] = []
+        index[prefix_key].append((clean_base, name, root))
+    return cache_key, index
+
+
+def rebuild_index_on_startup_background(config_data, on_complete_callback=None):
+    """软件启动时后台静默重建索引，完成后原子覆盖并可选回调通知。
+
+    构建期间使用临时变量存储结果，全部完成后一次性写入磁盘缓存和会话缓存，
+    防止用户在建索引期间开始打包导致使用不完整的索引。
+    """
+    global _STARTUP_INDEX_REBUILDING, _STARTUP_INDEX_REBUILT, _2D_INDEX_CACHE, _3D_INDEX_CACHE, _INDEX_REBUILT_THIS_SESSION
+
+    if _STARTUP_INDEX_REBUILDING or _STARTUP_INDEX_REBUILT:
+        return
+
+    _STARTUP_INDEX_REBUILDING = True
+
+    source_dirs_3d = config_data.get("source_dirs_3d", [])
+    source_dirs_2d = config_data.get("source_dirs_2d", [])
+    include_xt = config_data.get("include_xt_format", False)
+    max_workers = config_data.get("max_workers", 12)
+
+    def _worker():
+        global _STARTUP_INDEX_REBUILDING, _STARTUP_INDEX_REBUILT, _2D_INDEX_CACHE, _3D_INDEX_CACHE, _INDEX_REBUILT_THIS_SESSION
+        try:
+            start_time = time.time()
+            # 1. 先构建2D索引（临时变量，不覆盖现有缓存）
+            temp_2d_cache_key = None
+            temp_2d_result = None
+            if source_dirs_2d:
+                temp_2d_cache_key, index_2d, dwg_count, pdf_count, scan_dirs = _build_2d_index_silent(source_dirs_2d, max_workers)
+                temp_2d_result = (index_2d, dwg_count, pdf_count, scan_dirs)
+
+            # 2. 再构建3D索引（临时变量）
+            temp_3d_cache_key = None
+            temp_3d_index = None
+            if source_dirs_3d:
+                temp_3d_cache_key, temp_3d_index = _build_3d_index_silent(source_dirs_3d, include_xt, max_workers)
+
+            # 3. 全部构建完成后，一次性原子覆盖写入磁盘缓存
+            if temp_2d_result is not None:
+                index_2d, dwg_count, pdf_count, scan_dirs = temp_2d_result
+                _save_2d_disk_cache(temp_2d_cache_key, index_2d, dwg_count, pdf_count, scan_dirs)
+                _2D_INDEX_CACHE[temp_2d_cache_key] = temp_2d_result
+
+            if temp_3d_index is not None:
+                _save_3d_disk_cache(temp_3d_cache_key, temp_3d_index)
+                _3D_INDEX_CACHE[temp_3d_cache_key] = temp_3d_index
+
+            elapsed = time.time() - start_time
+            _INDEX_REBUILT_THIS_SESSION = True
+            _STARTUP_INDEX_REBUILT = True
+            print(f"✅ 后台索引重建完成（用时 {elapsed:.1f}s），已原子覆盖缓存")
+
+            # 4. 回调通知UI层（通过after调度回主线程）
+            if on_complete_callback:
+                try:
+                    on_complete_callback(elapsed)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"⚠️ 后台索引重建失败: {e}")
+        finally:
+            _STARTUP_INDEX_REBUILDING = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def build_2d_index(source_dirs, max_workers=12, force_refresh=False):
     """构建2D文件索引（子目录级并行扫描），索引 DWG 和 PDF，记录修改时间。
     三级回退：会话内存缓存 → 磁盘缓存（跨会话）→ 全量扫描。
     force_refresh=True 时跳过两级缓存，重新全量扫描并回写缓存。
     """
-    print("⏳ 正在构建2D文件索引（多线程扫描）...")
     start_time = time.time()
 
     cache_key = tuple(sorted(source_dirs))
@@ -706,7 +825,7 @@ def build_2d_index(source_dirs, max_workers=12, force_refresh=False):
     if not force_refresh and cache_key in _2D_INDEX_CACHE:
         index, dwg_count, pdf_count, scan_dirs = _2D_INDEX_CACHE[cache_key]
         total = dwg_count + pdf_count
-        print(f"✅ 2D索引命中会话缓存: {len(index)} 个前缀组, {dwg_count} DWG + {pdf_count} PDF = {total} 个文件, {scan_dirs} 个目录（本会话已扫描过）")
+        print(f"✅ 2D索引命中会话缓存: {total} 个文件（本会话已扫描过）")
         return index
 
     # 2. 磁盘缓存（跨会话，源目录不变即命中）
@@ -716,11 +835,11 @@ def build_2d_index(source_dirs, max_workers=12, force_refresh=False):
             index, dwg_count, pdf_count, scan_dirs = disk
             _2D_INDEX_CACHE[cache_key] = disk
             total = dwg_count + pdf_count
-            load_time = time.time() - start_time
-            print(f"✅ 2D索引命中磁盘缓存: {len(index)} 个前缀组, {dwg_count} DWG + {pdf_count} PDF = {total} 个文件, {scan_dirs} 个目录, 加载 {load_time:.2f}秒")
+            print(f"✅ 2D索引命中磁盘缓存: {total} 个文件")
             return index
 
     # 3. 全量扫描
+    print("⏳ 正在构建2D文件索引（多线程扫描）...")
     index, scan_dirs, dwg_count, pdf_count = _scan_2d_tree_parallel(source_dirs, max_workers)
 
     total_files = dwg_count + pdf_count
@@ -966,6 +1085,10 @@ def worker(config, progress_callback, stop_event):
     index_3d = build_3d_index(source_dirs_3d, include_xt=include_xt, max_workers=max_workers, force_refresh=force_rebuild)
     index_2d = build_2d_index(source_dirs_2d, max_workers=max_workers, force_refresh=force_rebuild)
 
+    # 通知主线程更新右下角索引时间（仅在真正重建时）
+    if force_rebuild:
+        progress_queue.put(("index_rebuilt", time.time()))
+
     original_files = read_original_file_list(list_file)
     if not original_files or len(original_files) == 0:
         print("🔥 无待处理文件，程序退出")
@@ -1088,14 +1211,14 @@ class SettingsWindow(ttk.Toplevel):
     def __init__(self, parent, config_data, on_save_callback):
         super().__init__(parent)
         self.title("配置管理")
-        self.geometry("860x760")
-        self.minsize(740, 660)
+        self.geometry("860x820")
+        self.minsize(740, 720)
         self.config_data = config_data.copy() if config_data else {}
         self.on_save_callback = on_save_callback
 
         self.transient(parent)
         self.grab_set()
-        center_window(self, parent, 860, 760)
+        center_window(self, parent, 860, 820)
         self._build_ui()
 
     def _build_ui(self):
@@ -1114,26 +1237,51 @@ class SettingsWindow(ttk.Toplevel):
         common.columnconfigure(1, weight=1)
         common.columnconfigure(3, weight=1)
 
-        self.list_entry = self._add_entry(common, 0, "原始清单文件", self.config_data.get("original_list_filename", "Original file list.txt"), span=3)
-        self.log_entry = self._add_entry(common, 1, "日志文件名", self.config_data.get("log_filename", "log.csv"), span=3)
+        # row 0: 图号清单文件 + 日志文件名 同一行
+        ttk.Label(common, text="图号清单文件").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=4)
+        self.list_entry = ttk.Entry(common)
+        self.list_entry.grid(row=0, column=1, sticky="ew", pady=4)
+        self.list_entry.insert(0, self.config_data.get("original_list_filename", "Original file list.txt"))
+        ttk.Label(common, text="日志文件名").grid(row=0, column=2, sticky="w", padx=(14, 6), pady=4)
+        self.log_entry = ttk.Entry(common)
+        self.log_entry.grid(row=0, column=3, sticky="ew", pady=4)
+        self.log_entry.insert(0, self.config_data.get("log_filename", "log.csv"))
 
-        ttk.Label(common, text="最大线程数").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        # row 1: 最大线程数 + 重试次数 同一行
+        ttk.Label(common, text="最大线程数").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
         self.workers_entry = ttk.Entry(common)
-        self.workers_entry.grid(row=2, column=1, sticky="ew", pady=4)
+        self.workers_entry.grid(row=1, column=1, sticky="ew", pady=4)
         self.workers_entry.insert(0, str(self.config_data.get("max_workers", 12)))
-        ttk.Label(common, text="重试次数").grid(row=2, column=2, sticky="w", padx=(14, 8), pady=4)
+        ttk.Label(common, text="重试次数").grid(row=1, column=2, sticky="w", padx=(14, 6), pady=4)
         self.retry_entry = ttk.Entry(common, width=10)
-        self.retry_entry.grid(row=2, column=3, sticky="w", pady=4)
+        self.retry_entry.grid(row=1, column=3, sticky="w", pady=4)
         self.retry_entry.insert(0, str(self.config_data.get("retry_attempts", 3)))
 
+        # row 2-3: 复选框一行三个
         self.rename_var = tk.BooleanVar(value=self.config_data.get("rename_3d_files", False))
         self.include_xt_var = tk.BooleanVar(value=self.config_data.get("include_xt_format", False))
+        self.rebuild_on_startup_var = tk.BooleanVar(value=self.config_data.get("rebuild_index_on_startup", True))
+        self.log_on_desktop_var = tk.BooleanVar(value=self.config_data.get("log_on_desktop", True))
+        self.list_on_desktop_var = tk.BooleanVar(value=self.config_data.get("list_on_desktop", True))
+        check_row1 = ttk.Frame(common)
+        check_row1.grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Checkbutton(
-            common, text="按照清单重命名3D文件", variable=self.rename_var, bootstyle="round-toggle"
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            check_row1, text="按照清单重命名3D文件", variable=self.rename_var, bootstyle="round-toggle"
+        ).pack(side=LEFT, padx=(0, 16))
         ttk.Checkbutton(
-            common, text="包含 XT 格式3D文件", variable=self.include_xt_var, bootstyle="round-toggle"
-        ).grid(row=3, column=2, columnspan=2, sticky="w", pady=(8, 0))
+            check_row1, text="包含 XT 格式3D文件", variable=self.include_xt_var, bootstyle="round-toggle"
+        ).pack(side=LEFT, padx=(0, 16))
+        ttk.Checkbutton(
+            check_row1, text="启动时后台重建索引", variable=self.rebuild_on_startup_var, bootstyle="round-toggle"
+        ).pack(side=LEFT)
+        check_row2 = ttk.Frame(common)
+        check_row2.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            check_row2, text="日志文件保存在桌面", variable=self.log_on_desktop_var, bootstyle="round-toggle"
+        ).pack(side=LEFT, padx=(0, 16))
+        ttk.Checkbutton(
+            check_row2, text="图号清单保存在桌面", variable=self.list_on_desktop_var, bootstyle="round-toggle"
+        ).pack(side=LEFT)
 
         # ── 普通/仕样号 模式设置（左右并排） ──
         mode_row = ttk.Frame(main)
@@ -1163,7 +1311,7 @@ class SettingsWindow(ttk.Toplevel):
         source_3d.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         source_3d.columnconfigure(0, weight=1)
         source_3d.rowconfigure(0, weight=1)
-        self.source_3d_text = self._build_dir_textarea(source_3d, self.config_data.get("source_dirs_3d", []))
+        self.source_3d_text = self._build_dir_textarea(source_3d, self.config_data.get("source_dirs_3d", []), height=7)
         self._build_dir_buttons(source_3d, self._add_source_3d, self._remove_source_3d, self._clear_source_3d)
 
         # ── 2D 源目录 ──
@@ -1171,13 +1319,21 @@ class SettingsWindow(ttk.Toplevel):
         source_2d.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
         source_2d.columnconfigure(0, weight=1)
         source_2d.rowconfigure(0, weight=1)
-        self.source_2d_text = self._build_dir_textarea(source_2d, self.config_data.get("source_dirs_2d", []))
+        self.source_2d_text = self._build_dir_textarea(source_2d, self.config_data.get("source_dirs_2d", []), height=3)
         self._build_dir_buttons(source_2d, self._add_source_2d, self._remove_source_2d, self._clear_source_2d)
 
         footer = ttk.Frame(self, padding=(14, 0, 14, 14))
         footer.grid(row=1, column=0, sticky="ew")
-        ttk.Button(footer, text="取消", bootstyle="secondary-outline", command=self.destroy).pack(side=RIGHT)
-        ttk.Button(footer, text="保存配置", bootstyle="success", command=self._save_config).pack(side=RIGHT, padx=(0, 8))
+        footer.columnconfigure(1, weight=1)
+        ttk.Button(footer, text="取消", bootstyle="secondary-outline", command=self.destroy).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            footer,
+            text="公共配置文件，请谨慎修改",
+            foreground="red",
+            font=("Microsoft YaHei UI", 11, "bold"),
+            anchor="center",
+        ).grid(row=0, column=1, sticky="ew", padx=8)
+        ttk.Button(footer, text="保存配置", bootstyle="success", command=self._save_config).grid(row=0, column=2, sticky="e")
 
     def _add_entry(self, parent, row: int, label: str, value: str, span: int = 1):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
@@ -1186,12 +1342,12 @@ class SettingsWindow(ttk.Toplevel):
         entry.insert(0, value)
         return entry
 
-    def _build_dir_textarea(self, parent, dirs):
+    def _build_dir_textarea(self, parent, dirs, height=4):
         outer = ttk.Frame(parent)
         outer.grid(row=0, column=0, sticky="nsew")
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(0, weight=1)
-        text = tk.Text(outer, height=4, wrap="none", font=("Microsoft YaHei UI", 10), relief="solid", borderwidth=1)
+        text = tk.Text(outer, height=height, wrap="none", font=("Microsoft YaHei UI", 10), relief="solid", borderwidth=1)
         text.grid(row=0, column=0, sticky="nsew")
         yscroll = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=text.yview)
         yscroll.grid(row=0, column=1, sticky="ns")
@@ -1244,6 +1400,9 @@ class SettingsWindow(ttk.Toplevel):
             self.source_2d_text.delete("1.0", tk.END)
 
     def _save_config(self):
+        # 公共配置文件，二次确认防止误修改
+        if not messagebox.askyesno("确认", "这是公共配置文件，修改需要管理员许可。\n确定要保存修改吗？"):
+            return
         try:
             max_workers = int(self.workers_entry.get())
             retry_attempts = int(self.retry_entry.get())
@@ -1272,6 +1431,9 @@ class SettingsWindow(ttk.Toplevel):
             self.config_data["source_dirs_2d"] = source_dirs_2d
             self.config_data["rename_3d_files"] = self.rename_var.get()
             self.config_data["include_xt_format"] = self.include_xt_var.get()
+            self.config_data["rebuild_index_on_startup"] = self.rebuild_on_startup_var.get()
+            self.config_data["log_on_desktop"] = self.log_on_desktop_var.get()
+            self.config_data["list_on_desktop"] = self.list_on_desktop_var.get()
             self.config_data["prefer_desktop"] = self.prefer_desktop_var.get()
             self.config_data["spec_base_dir"] = spec_base_dir
             apply_runtime_paths(self.config_data)
@@ -1286,14 +1448,15 @@ class SettingsWindow(ttk.Toplevel):
 
 
 class ListManagerWindow(ttk.Toplevel):
-    """清单管理窗口。"""
+    """图号管理窗口。"""
 
-    def __init__(self, parent, list_file_path, on_save_callback):
+    def __init__(self, parent, list_file_path, config_data, on_save_callback):
         super().__init__(parent)
-        self.title("清单管理")
+        self.title("图号管理")
         self.geometry("820x620")
         self.minsize(680, 500)
         self.list_file_path = list_file_path
+        self.config_data = config_data or {}
         self.on_save_callback = on_save_callback
 
         self.transient(parent)
@@ -1311,7 +1474,7 @@ class ListManagerWindow(ttk.Toplevel):
         header.grid(row=0, column=0, sticky="ew")
         ttk.Label(
             header,
-            text=f"编辑清单文件: {os.path.basename(self.list_file_path)}",
+            text=f"编辑图号清单: {os.path.basename(self.list_file_path)}",
             font=("Microsoft YaHei UI", 15, "bold"),
         ).pack(anchor="w")
 
@@ -1344,13 +1507,20 @@ class ListManagerWindow(ttk.Toplevel):
     def _save_and_exit(self):
         try:
             content = self.text_editor.get("1.0", "end-1c")
-            with open(self.list_file_path, "w", encoding="utf-8-sig") as f:
+            # 根据配置决定保存路径：开启 list_on_desktop 时保存到桌面，否则保存到原路径
+            if self.config_data.get("list_on_desktop", True):
+                desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+                original_list_filename = self.config_data.get("original_list_filename", "Original file list.txt")
+                save_path = os.path.join(desktop, original_list_filename)
+            else:
+                save_path = self.list_file_path
+            with open(save_path, "w", encoding="utf-8-sig") as f:
                 f.write(content)
 
             if self.on_save_callback:
-                self.on_save_callback()
+                self.on_save_callback(save_path)
 
-            messagebox.showinfo("成功", "清单文件已保存")
+            messagebox.showinfo("成功", f"图号清单已保存:\n{save_path}")
             self.destroy()
         except Exception as e:
             messagebox.showerror("错误", f"保存文件失败: {str(e)}")
@@ -1627,6 +1797,17 @@ class GunbagFetcherApp(ttk.Window):
         footer.columnconfigure(0, weight=1)
         ttk.Label(footer, textvariable=self.status_var, bootstyle="secondary").grid(row=0, column=0, sticky="w")
 
+        # 右下角：索引时间 | IP | 计算机名
+        self._index_time_str = "--"
+        self._ip_str = self._get_local_ip()
+        self._hostname_str = socket.gethostname()
+        self._bottom_right_var = tk.StringVar(
+            value=f"{self._index_time_str} | {self._ip_str} | {self._hostname_str}"
+        )
+        ttk.Label(footer, textvariable=self._bottom_right_var, bootstyle="secondary").grid(
+            row=0, column=1, sticky="e"
+        )
+
     def _build_controls(self, parent):
         parent.columnconfigure(0, weight=1)
 
@@ -1635,7 +1816,7 @@ class GunbagFetcherApp(ttk.Window):
         file_box.columnconfigure(0, weight=1)
 
         self._add_file_picker(file_box, "配置文件", self.config_label_var, self._select_config, 0)
-        self._add_file_picker(file_box, "原始清单", self.list_label_var, self._select_list_file, 1)
+        self._add_file_picker(file_box, "图号清单", self.list_label_var, self._select_list_file, 1)
 
         option_box = ttk.Labelframe(parent, text="选项", padding=12)
         option_box.grid(row=1, column=0, sticky="ew", pady=(12, 0))
@@ -1699,7 +1880,7 @@ class GunbagFetcherApp(ttk.Window):
         )
         self.list_manager_btn = ttk.Button(
             action_box,
-            text="清单管理",
+            text="图号管理",
             bootstyle="secondary-outline",
             command=self._open_list_manager,
             state="disabled",
@@ -1774,14 +1955,14 @@ class GunbagFetcherApp(ttk.Window):
             self.config_data["rename_3d_files"] = self.rename_checkbox_var.get()
             save_configuration(self.config_path, self.config_data)
             self._clear_log()
-            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
+            self._reload_config_preserving_list()
 
     def _on_include_xt_change(self):
         if self.config_data and self.config_path:
             self.config_data["include_xt_format"] = self.include_xt_checkbox_var.get()
             save_configuration(self.config_path, self.config_data)
             self._clear_log()
-            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
+            self._reload_config_preserving_list()
 
     def _on_rebuild_index_change(self):
         global _INDEX_REBUILT_THIS_SESSION
@@ -1793,14 +1974,14 @@ class GunbagFetcherApp(ttk.Window):
             self.config_data["rebuild_index_before_pack"] = self.rebuild_index_var.get()
             save_configuration(self.config_path, self.config_data)
             self._clear_log()
-            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
+            self._reload_config_preserving_list()
 
     def _on_prefer_desktop_change(self):
         if self.config_data and self.config_path:
             self.config_data["prefer_desktop"] = self.prefer_desktop_var.get()
             save_configuration(self.config_path, self.config_data)
             self._clear_log()
-            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
+            self._reload_config_preserving_list()
             self._update_mode_status()
 
     def _build_spec_entry(self, parent):
@@ -1862,6 +2043,35 @@ class GunbagFetcherApp(ttk.Window):
             return ""
         return val
 
+    def _reload_config_preserving_list(self):
+        """重新加载配置，但保留已加载的图号清单路径（可能是桌面路径）。
+
+        load_configuration 返回的 list_file 始终指向程序同目录，
+        若用户已通过图号管理保存到桌面，切换模式/勾选开关后不应丢失该路径。
+        """
+        if not (self.config_data and self.config_path):
+            return
+        saved_list_path = self.list_file_path
+        self.config_data = load_configuration(self.config_path, self.spec_mode_var.get(), silent=True)
+        if self.config_data and saved_list_path and os.path.exists(saved_list_path):
+            self.config_data["list_file"] = saved_list_path
+        # 统一输出正确的配置信息（待处理列表为已保存的桌面路径）
+        mode_label = "仕样号模式" if self.spec_mode_var.get() else "普通模式"
+        print(f"✅ 配置加载成功（{mode_label}）:")
+        print(f"   3D源目录数量: {len(self.config_data.get('source_dirs_3d', []))}")
+        print(f"   2D源目录数量: {len(self.config_data.get('source_dirs_2d', []))}")
+        print(f"   待处理列表: {self.config_data['list_file']}")
+        print(f"   日志文件: {self.config_data.get('log_file', '')}")
+        print(f"   最大线程数: {self.config_data.get('max_workers', 12)}")
+        print(f"   重试次数: {self.config_data.get('retry_attempts', 3)}")
+        print(f"   3D按清单重命名: {'是' if self.config_data.get('rename_3d_files') else '否'}")
+        print(f"   包含 XT 格式: {'是' if self.config_data.get('include_xt_format') else '否'}")
+        print(f"   打包前重建索引: {'是' if self.config_data.get('rebuild_index_before_pack') else '否'}")
+        if self.spec_mode_var.get():
+            print(f"   仕样号文件夹: {self.config_data.get('spec_base_dir', '')}")
+        else:
+            print(f"   输出目录: {self.config_data.get('output_dir', '')}")
+
     def _update_mode_status(self):
         """根据当前模式刷新状态栏信息（不同模式显示不同配置信息）。"""
         if self.spec_mode_var.get():
@@ -1882,10 +2092,10 @@ class GunbagFetcherApp(ttk.Window):
             if self.config_data:
                 self.config_data["spec_mode"] = False
                 apply_runtime_paths(self.config_data)
-        # 已有配置时重新加载一次，让日志输出随模式刷新
+        # 已有配置时重新加载一次，让日志输出随模式刷新（保留已保存的图号清单路径）
         if self.config_data and self.config_path:
             self._clear_log()
-            self.config_data = load_configuration(self.config_path, self.spec_mode_var.get())
+            self._reload_config_preserving_list()
         self._update_mode_status()
 
     def _change_theme(self, _=None):
@@ -1950,6 +2160,11 @@ class GunbagFetcherApp(ttk.Window):
                 if item[1]:
                     self.open_output_btn.configure(state="normal")
                     self.view_log_btn.configure(state="normal")
+            elif item[0] == "index_rebuilt":
+                self._index_time_str = datetime.now().strftime("%y%m%d%H%M%S")
+                self._bottom_right_var.set(
+                    f"{self._index_time_str} | {self._ip_str} | {self._hostname_str}"
+                )
 
     def _listen_queues(self):
         if self._closing:
@@ -1957,6 +2172,26 @@ class GunbagFetcherApp(ttk.Window):
         self._drain_queues()
         delay = 20 if not log_queue.empty() else 100
         self.after(delay, self._listen_queues)
+
+    def _get_local_ip(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+
+    def _on_startup_index_rebuilt(self, elapsed):
+        """启动时后台索引重建完成后的回调（通过after调度回主线程）。"""
+        if self._closing or not self.winfo_exists():
+            return
+        self.status_var.set(f"索引已更新（用时 {elapsed:.1f}s）")
+        self._index_time_str = datetime.now().strftime("%y%m%d%H%M%S")
+        self._bottom_right_var.set(
+            f"{self._index_time_str} | {self._ip_str} | {self._hostname_str}"
+        )
 
     def _auto_load_files(self):
         self._clear_log()
@@ -1983,6 +2218,13 @@ class GunbagFetcherApp(ttk.Window):
 
                 self.start_btn.configure(state="normal")
                 self._update_mode_status()
+
+                # 启动时后台静默重建索引
+                if self.config_data.get("rebuild_index_on_startup", True):
+                    rebuild_index_on_startup_background(
+                        self.config_data,
+                        on_complete_callback=lambda e: self.after(0, self._on_startup_index_rebuilt, e),
+                    )
         else:
             self.status_var.set("请选择配置文件")
 
@@ -2016,7 +2258,7 @@ class GunbagFetcherApp(ttk.Window):
 
     def _select_list_file(self):
         file_path = filedialog.askopenfilename(
-            title="选择原始清单文件",
+            title="选择图号清单文件",
             filetypes=[("TXT文件", "*.txt"), ("CSV文件", "*.csv"), ("所有文件", "*.*")],
         )
 
@@ -2053,6 +2295,9 @@ class GunbagFetcherApp(ttk.Window):
                 "source_dirs_2d": [],
                 "rename_3d_files": False,
                 "include_xt_format": False,
+                "rebuild_index_on_startup": True,
+                "log_on_desktop": True,
+                "list_on_desktop": True,
                 "prefer_desktop": True,
                 "spec_base_dir": SPEC_BASE_DIR,
             }
@@ -2074,12 +2319,16 @@ class GunbagFetcherApp(ttk.Window):
             self.rebuild_index_var.set(self.config_data.get("rebuild_index_before_pack", True))
             self.prefer_desktop_var.set(self.config_data.get("prefer_desktop", True))
 
-            list_file = self.config_data.get("list_file")
-            if os.path.exists(list_file):
-                self._clear_log()
-                self.list_file_path = list_file
-                self.list_label_var.set(os.path.basename(list_file))
-                self.list_manager_btn.configure(state="normal")
+            # 保留已加载的图号清单路径：load_configuration 返回的是程序同目录的默认路径，
+            # 若当前已有有效的图号清单路径（可能是桌面路径），则不覆盖
+            if self.list_file_path and os.path.exists(self.list_file_path):
+                self.config_data["list_file"] = self.list_file_path
+            else:
+                list_file = self.config_data.get("list_file")
+                if list_file and os.path.exists(list_file):
+                    self.list_file_path = list_file
+                    self.list_label_var.set(os.path.basename(list_file))
+                    self.list_manager_btn.configure(state="normal")
 
             self.start_btn.configure(state="normal")
             self.config_label_var.set(os.path.basename(self.config_path))
@@ -2087,27 +2336,34 @@ class GunbagFetcherApp(ttk.Window):
 
     def _open_list_manager(self):
         if not self.list_file_path:
-            messagebox.showwarning("警告", "请先选择清单文件")
+            messagebox.showwarning("警告", "请先选择图号清单")
             return
 
-        list_manager_window = ListManagerWindow(self, self.list_file_path, self._on_list_saved)
+        list_manager_window = ListManagerWindow(self, self.list_file_path, self.config_data, self._on_list_saved)
         list_manager_window.focus()
 
-    def _on_list_saved(self):
-        print(f"✅ 清单文件已保存: {self.list_file_path}")
+    def _on_list_saved(self, saved_path=None):
+        # 图号管理保存后，更新当前图号清单路径（可能已切换到桌面路径）
+        if saved_path:
+            self.list_file_path = saved_path
+            self.list_label_var.set(os.path.basename(saved_path))
+            # 同步更新 config_data 中的待处理列表路径，确保后续打包和日志使用新路径
+            if self.config_data:
+                self.config_data["list_file"] = saved_path
+        print(f"✅ 图号清单已保存: {self.list_file_path}")
         self._clear_log()
-        print("🔄 正在重新加载清单文件...")
+        print("🔄 正在重新加载图号清单...")
 
         if self.config_data:
             original_files = read_original_file_list(self.list_file_path)
             if original_files:
-                print(f"✅ 清单文件重新加载成功，共 {len(original_files)} 个文件")
+                print(f"✅ 图号清单重新加载成功，共 {len(original_files)} 个图号")
             else:
-                print("⚠️ 清单文件重新加载失败")
+                print("⚠️ 图号清单重新加载失败")
 
     def _start_process(self):
         if not self.config_data or not self.list_file_path:
-            messagebox.showwarning("警告", "请先选择配置文件和清单文件")
+            messagebox.showwarning("警告", "请先选择配置文件和图号清单")
             return
 
         self._clear_log()
@@ -2140,8 +2396,6 @@ class GunbagFetcherApp(ttk.Window):
             else:
                 print(f"📁 已创建仕样号目录: {spec_dir}")
             self.config_data["output_dir"] = spec_dir
-        else:
-            ensure_output_directory(self.config_data.get("output_dir"))
 
         self.running = True
         self.start_btn.configure(state="disabled")
@@ -2167,7 +2421,7 @@ class GunbagFetcherApp(ttk.Window):
             self.config_data["prefer_desktop"] = self.prefer_desktop_var.get()
             self.config_data["list_file"] = self.list_file_path
             if self.config_path:
-                save_configuration(self.config_path, self.config_data)
+                save_configuration(self.config_path, self.config_data, show_log=False)
             # save_configuration 不写 output_dir/spec_mode，重新确认仕样号模式覆盖
             self.config_data["spec_mode"] = spec_mode
             if spec_mode:

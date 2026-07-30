@@ -1,6 +1,6 @@
 [project]
 name = "obara-gunbag-fetcher"
-version = "1.0.7"
+version = "1.0.8"
 description = "A Python GUI tool for batch fetching gunbags from ZIP archives."
 readme = "README.md"
 requires-python = ">=3.9"
