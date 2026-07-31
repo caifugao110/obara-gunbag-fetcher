@@ -249,8 +249,12 @@ def load_configuration(config_path, spec_mode=False, silent=False):
             output_dir = os.path.join(desktop, output_dir_name)
         else:
             output_dir = os.path.join(root_path, output_dir_name)
-        # 图号清单首次加载始终从程序同目录查找；仅在图号管理中保存过才会存到桌面
-        list_file = os.path.join(root_path, original_list_filename)
+        # 图号清单优先从桌面加载，桌面没有时才用程序同目录下的
+        desktop_list_file = os.path.join(desktop, original_list_filename)
+        if os.path.exists(desktop_list_file):
+            list_file = desktop_list_file
+        else:
+            list_file = os.path.join(root_path, original_list_filename)
         if log_on_desktop:
             log_file = os.path.join(desktop, log_filename)
         else:
@@ -355,8 +359,13 @@ def apply_runtime_paths(config_data):
         config_data["output_dir"] = os.path.join(desktop, config_data.get("output_dir_name", "output"))
     else:
         config_data["output_dir"] = os.path.join(root_path, config_data.get("output_dir_name", "output"))
-    # 图号清单首次加载始终从程序同目录查找；仅在图号管理中保存过才会存到桌面
-    config_data["list_file"] = os.path.join(root_path, config_data.get("original_list_filename", "Original file list.txt"))
+    # 图号清单优先从桌面加载，桌面没有时才用程序同目录下的
+    original_list_filename = config_data.get("original_list_filename", "Original file list.txt")
+    desktop_list_file = os.path.join(desktop, original_list_filename)
+    if os.path.exists(desktop_list_file):
+        config_data["list_file"] = desktop_list_file
+    else:
+        config_data["list_file"] = os.path.join(root_path, original_list_filename)
     if config_data.get("log_on_desktop", True):
         config_data["log_file"] = os.path.join(desktop, config_data.get("log_filename", "log.csv"))
     else:
@@ -1703,6 +1712,10 @@ class GunbagFetcherApp(ttk.Window):
         self.start_time = 0
         self.original_stdout = sys.stdout
         self._closing = False
+        self._cache_monitoring = False
+        self._cache_last_mtime = None
+        self._cache_poll_id = None
+        self._cache_owner_str = ""
 
         self.theme_var = tk.StringVar(value="yeti")
         self.spec_mode_var = tk.BooleanVar(value=True)
@@ -1798,9 +1811,9 @@ class GunbagFetcherApp(ttk.Window):
         ttk.Label(footer, textvariable=self.status_var, bootstyle="secondary").grid(row=0, column=0, sticky="w")
 
         # 右下角：索引时间 | IP | 计算机名
-        self._index_time_str = "--"
+        self._index_time_str = "请等待重建最新索引，时间大概30秒"
         self._ip_str = self._get_local_ip()
-        self._hostname_str = socket.gethostname()
+        self._hostname_str = socket.gethostname().upper()
         self._bottom_right_var = tk.StringVar(
             value=f"{self._index_time_str} | {self._ip_str} | {self._hostname_str}"
         )
@@ -2163,8 +2176,9 @@ class GunbagFetcherApp(ttk.Window):
             elif item[0] == "index_rebuilt":
                 self._index_time_str = datetime.now().strftime("%y%m%d%H%M%S")
                 self._bottom_right_var.set(
-                    f"{self._index_time_str} | {self._ip_str} | {self._hostname_str}"
+                    f"当前索引时间戳为：{self._build_time_display(self._index_time_str)} | {self._ip_str} | {self._hostname_str}"
                 )
+                self._start_cache_monitoring()
 
     def _listen_queues(self):
         if self._closing:
@@ -2183,6 +2197,38 @@ class GunbagFetcherApp(ttk.Window):
         except Exception:
             return "127.0.0.1"
 
+    def _get_cache_owner(self):
+        """获取缓存文件所有者的用户名（Windows 下通过 PowerShell Get-Acl 获取）。"""
+        path = _cache_path()
+        try:
+            if not os.path.exists(path):
+                return ""
+            if os.name == "nt":
+                kwargs = {"capture_output": True, "text": True, "timeout": 5}
+                if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                escaped_path = path.replace("'", "''")
+                result = subprocess.run(
+                    ["powershell", "-Command", f"(Get-Acl '{escaped_path}').Owner"],
+                    **kwargs,
+                )
+                owner = result.stdout.strip()
+                if owner and "\\" in owner:
+                    return owner.split("\\")[-1]
+                elif owner:
+                    return owner
+        except Exception:
+            pass
+        return ""
+
+    def _build_time_display(self, timestamp_str):
+        """构建带所有者后缀的时间戳显示，如 260731150102-{GAOJ}。"""
+        owner = self._get_cache_owner()
+        if owner:
+            self._cache_owner_str = owner
+            return f"{timestamp_str}-{{{owner.upper()}}}"
+        return timestamp_str
+
     def _on_startup_index_rebuilt(self, elapsed):
         """启动时后台索引重建完成后的回调（通过after调度回主线程）。"""
         if self._closing or not self.winfo_exists():
@@ -2190,8 +2236,44 @@ class GunbagFetcherApp(ttk.Window):
         self.status_var.set(f"索引已更新（用时 {elapsed:.1f}s）")
         self._index_time_str = datetime.now().strftime("%y%m%d%H%M%S")
         self._bottom_right_var.set(
-            f"{self._index_time_str} | {self._ip_str} | {self._hostname_str}"
+            f"当前索引时间戳为：{self._build_time_display(self._index_time_str)} | {self._ip_str} | {self._hostname_str}"
         )
+        self._start_cache_monitoring()
+
+    def _start_cache_monitoring(self):
+        """开始监控缓存文件变化（每30秒检查一次）。"""
+        if self._cache_monitoring or self._closing:
+            return
+        self._cache_monitoring = True
+        self._cache_last_mtime = self._get_cache_mtime()
+        self._monitor_cache_changes()
+
+    def _get_cache_mtime(self):
+        """获取缓存文件的修改时间，文件不存在返回 None。"""
+        path = _cache_path()
+        try:
+            if os.path.exists(path):
+                return os.path.getmtime(path)
+        except Exception:
+            pass
+        return None
+
+    def _monitor_cache_changes(self):
+        """检查缓存文件是否变化，有变化则更新右下角提示。"""
+        if self._closing:
+            return
+        current_mtime = self._get_cache_mtime()
+        if current_mtime is not None and self._cache_last_mtime is not None:
+            if current_mtime != self._cache_last_mtime:
+                self._cache_last_mtime = current_mtime
+                new_time_str = datetime.fromtimestamp(current_mtime).strftime("%y%m%d%H%M%S")
+                self._index_time_str = new_time_str
+                self._bottom_right_var.set(
+                    f"检测到缓存变化，最新的索引时间戳为：{self._build_time_display(new_time_str)} | {self._ip_str} | {self._hostname_str}"
+                )
+        elif current_mtime is not None and self._cache_last_mtime is None:
+            self._cache_last_mtime = current_mtime
+        self._cache_poll_id = self.after(10000, self._monitor_cache_changes)
 
     def _auto_load_files(self):
         self._clear_log()
@@ -2504,6 +2586,9 @@ class GunbagFetcherApp(ttk.Window):
             self.stop_event.set()
 
         self._closing = True
+        if self._cache_poll_id is not None:
+            self.after_cancel(self._cache_poll_id)
+            self._cache_poll_id = None
         if hasattr(sys.stdout, "flush"):
             sys.stdout.flush()
         self._drain_queues()
