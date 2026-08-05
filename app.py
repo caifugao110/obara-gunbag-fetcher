@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import csv
+import getpass
 import os
 import pickle
 import queue
@@ -727,6 +728,84 @@ def _save_3d_disk_cache(cache_key, index):
     _save_disk_cache(disk)
 
 
+# ===== 索引重建 / 打包审计日志（静默写入网络共享，不显示于界面与配置文件） =====
+_CACHE_LOG_DIR = r"\\192.168.160.2\生产管理部3d\3D 资料\check\check27\Version control\GUNBAG\LOG\CACHE"
+_FETCH_LOG_DIR = r"\\192.168.160.2\生产管理部3d\3D 资料\check\check27\Version control\GUNBAG\LOG\FETCH"
+
+
+def _log_current_user():
+    """获取当前系统用户名（大写）。"""
+    try:
+        return getpass.getuser().upper()
+    except Exception:
+        return os.environ.get("USERNAME", "UNKNOWN").upper()
+
+
+def _log_local_ip():
+    """获取本机局域网IP。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _log_cache_rebuild(elapsed):
+    """索引重建成功后，追加一条记录到 CACHE 日志（按日期归档）。
+    记录格式：日期 时间,用户名(大写),本机IP,索引耗时,缓存文件大小。全程静默，成败均不影响主界面。
+    仅在启动后台索引重建成功后触发。
+    """
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        log_file = os.path.join(_CACHE_LOG_DIR, f"{today}_CACHELOG.TXT")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        size_kb = 0
+        cache_path = _cache_path()
+        if os.path.exists(cache_path):
+            size_kb = os.path.getsize(cache_path) // 1024
+        elapsed_str = f"{elapsed:.1f}s"
+        line = f"{now},{_log_current_user()},{_log_local_ip()},{elapsed_str},{size_kb}KB\n"
+        os.makedirs(_CACHE_LOG_DIR, exist_ok=True)
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+def _open_fetch_log():
+    """打开当日 FETCH 日志文件句柄（追加模式），失败返回 None。"""
+    try:
+        os.makedirs(_FETCH_LOG_DIR, exist_ok=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        log_file = os.path.join(_FETCH_LOG_DIR, f"{today}_FETCHLOG.TXT")
+        return open(log_file, "a", encoding="utf-8")
+    except Exception:
+        return None
+
+
+def _write_fetch_log_line(handle, result, output_dir):
+    """向 FETCH 日志追加一条打包结果记录。
+    记录格式：日期 时间,用户名(大写),原始文件名,3D文件路径,2D文件路径,状态,输出目录。
+    """
+    if handle is None:
+        return
+    try:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        found_3d = result.get("found_3d_path", "") or "无"
+        found_2d = result.get("found_2d_path", "") or "无"
+        line = (
+            f"{now},{_log_current_user()},{result.get('original', '')},"
+            f"{found_3d},{found_2d},{result.get('status', '')},{output_dir}\n"
+        )
+        handle.write(line)
+        handle.flush()
+    except Exception:
+        pass
+
+
 def _build_2d_index_silent(source_dirs, max_workers=12):
     """静默构建2D索引（不写会话缓存，仅扫描并返回结果，不打印进度）。"""
     cache_key = tuple(sorted(source_dirs))
@@ -806,6 +885,7 @@ def rebuild_index_on_startup_background(config_data, on_complete_callback=None):
             _INDEX_REBUILT_THIS_SESSION = True
             _STARTUP_INDEX_REBUILT = True
             print(f"✅ 后台索引重建完成（用时 {elapsed:.1f}s），已原子覆盖缓存")
+            _log_cache_rebuild(elapsed)
 
             # 4. 回调通知UI层（通过after调度回主线程）
             if on_complete_callback:
@@ -1116,6 +1196,7 @@ def worker(config, progress_callback, stop_event):
         for item in search_items
     ]
 
+    fetch_log_handle = _open_fetch_log()
     try:
         for idx, future in enumerate(as_completed(futures)):
             if stop_event.is_set():
@@ -1125,6 +1206,7 @@ def worker(config, progress_callback, stop_event):
 
             result = future.result()
             result_log.append(result)
+            _write_fetch_log_line(fetch_log_handle, result, output_dir)
 
             if result["status"] == "success":
                 success_count += 1
@@ -1149,6 +1231,11 @@ def worker(config, progress_callback, stop_event):
             )
     finally:
         executor.shutdown(wait=False)
+        if fetch_log_handle is not None:
+            try:
+                fetch_log_handle.close()
+            except Exception:
+                pass
 
     if not stop_event.is_set():
         write_result_log(log_file, result_log)
