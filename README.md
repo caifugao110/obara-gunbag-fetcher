@@ -195,7 +195,7 @@ dist\obara-gunbag-fetcher.exe
 构建脚本会从 `pyproject.toml` 读取项目元数据，自动生成 Windows 可执行文件的版本信息资源，包含：
 
 - 产品名称、文件描述
-- 文件版本（如 `1.0.8.0`）
+- 文件版本（如 `1.1.1.0`）
 - 公司/作者名
 - 版权声明（`Copyright (C) 2026 Tobin. All rights reserved.`）
 - 原始文件名（`obara-gunbag-fetcher.exe`）
@@ -219,7 +219,7 @@ dist\obara-gunbag-fetcher.exe
 4. 在 `windows-latest` runner 上使用 Python 3.11 调用 PyInstaller 生成 exe
 5. 创建 GitHub Release 并上传 `obara-gunbag-fetcher.exe` 产物
 
-> **注意**：GitHub Actions 使用简化版 PyInstaller 参数（不含 `--noupx`、版本信息文件、`--clean`、`--noconfirm`），与本地构建脚本略有差异。本地构建脚本（`scripts/build_exe.ps1`）功能更完整。
+> **注意**：GitHub Actions 使用简化版 PyInstaller 参数（不含 `--noupx`、Windows 版本信息文件、`--collect-all`、`--hidden-import` 等本地脚本特有的项），与本地构建脚本略有差异。本地构建脚本（`scripts/build_exe.ps1`）功能更完整。
 
 > **注意**：运行时更新日志和帮助文档从 Gitee 获取（参见下方"服务端说明"），构建产物托管在 GitHub Releases。
 
@@ -232,7 +232,7 @@ original_list_file = Original file list.txt
 log_file = Fetch log.csv
 
 [Settings]
-max_workers = 24
+max_workers = 12
 retry_attempts = 3
 rename_3d_files = false
 include_xt_format = false
@@ -241,20 +241,20 @@ rebuild_index_on_startup = true
 log_on_desktop = true
 list_on_desktop = true
 prefer_desktop = true
-spec_base_dir = \\SERVER\Share\临时文件\00枪衣数模
+spec_base_dir = \\192.168.160.70\文件中转\临时文件\00枪衣数模
 
 [3D_SourceDirectories]
-source_1 = \\SERVER\Share\3D资料\设计一课3D资料\03-SV GUN STEP
-source_2 = \\SERVER\Share\3D资料\吉利标准化\07吉利库STEP
-source_3 = \\SERVER\Share\3D资料\设计一课3D资料\01-SV GUN ASSY\13-PSA\00-STP
-source_4 = \\SERVER\Share\制造技术一课\checkc
+source_1 = \\192.168.160.2\生产管理部3d\3D 资料\设计一课3D资料\03-SV GUN STEP
+source_2 = \\192.168.160.2\生产管理部3d\3D 资料\吉利标准化\07吉利库STEP
+source_3 = \\192.168.160.2\生产管理部3d\3D 资料\设计一课3D资料\01-SV GUN ASSY\13-PSA\00-STP
+source_4 = \\192.168.160.2\生产管理部3d\3D 资料\设计二课3D资料\0000 3D\STEP
 ...
 
 [2D_SourceDirectories]
-source_1 = \\SERVER\Share\2D\已导入PDM\二课
-source_2 = \\SERVER\Share\2D\已导入PDM\上海
-source_3 = \\SERVER\Share\2D\已导入PDM\一课
-source_4 = \\SERVER\Share\制造技术一课\checkc
+source_1 = \\192.168.160.2\生产管理部\2D\已导入PDM\二课
+source_2 = \\192.168.160.2\生产管理部\2D\已导入PDM\上海
+source_3 = \\192.168.160.2\生产管理部\2D\已导入PDM\一课
+source_4 = \\192.168.160.2\生产管理部\2D\制造技术一课\checkc
 ```
 
 > **💡 桌面优先加载图号清单**：程序启动时会自动检测桌面上是否存在 `original_list_file` 配置项指定的清单文件（如 `Original file list.txt`）。若桌面存在该文件，程序会优先加载桌面版本；仅当桌面文件不存在时，才回退使用程序同目录下的清单文件。此机制方便用户在桌面维护一份常用清单而无需复制到程序目录。
@@ -277,7 +277,7 @@ source_4 = \\SERVER\Share\制造技术一课\checkc
 | `log_on_desktop` | bool | 日志文件是否保存到桌面（开启时日志输出至桌面，否则保存到程序目录） | `true` |
 | `list_on_desktop` | bool | 图号清单编辑保存时是否保存到桌面（开启时清单管理保存到桌面） | `true` |
 | `prefer_desktop` | bool | 优先将输出保存到桌面 gunbag 目录（普通模式下生效） | `true` |
-| `spec_base_dir` | string | 仕样号模式下的根目录，按仕样号创建子目录 | `\\SERVER\Share\临时文件\00枪衣数模` |
+| `spec_base_dir` | string | 仕样号模式下的根目录，按仕样号创建子目录 | `\\192.168.160.70\文件中转\临时文件\00枪衣数模` |
 | `3D_SourceDirectories.source_*` | string | 3D 源目录（完整 UNC 或本地路径） | — |
 | `2D_SourceDirectories.source_*` | string | 2D 源目录（完整 UNC 或本地路径） | — |
 
@@ -357,7 +357,7 @@ SRTX-2C14693L
 4. **准备清单文件** — 与普通模式相同，准备 `.csv` 或 `.txt` 文件。
 
 5. **开始打包** — 点击"开始批量打包"按钮。程序会：
-   - 自动创建仕样号子目录（如 `\\SERVER\Share\临时文件\00枪衣数模\00123\`）
+   - 自动创建仕样号子目录（如 `\\192.168.160.70\文件中转\临时文件\00枪衣数模\00123\`）
    - 若目录已存在，则追加打包（已存在的 ZIP 自动跳过）
    - 不清空目录，保留历史打包记录
 
@@ -613,7 +613,7 @@ SRTX-2C14701L.zip
 
 ```
 obara-gunbag-fetcher/
-├── app.py                  # GUI 主程序，包含全部核心逻辑（单文件约 2600 行）
+├── app.py                  # GUI 主程序，包含全部核心逻辑（单文件约 2300 行）
 ├── assets/
 │   └── app.ico             # 应用图标
 ├── scripts/
@@ -638,7 +638,7 @@ obara-gunbag-fetcher/
 
 | 文件/目录 | 说明 |
 |---|---|
-| `app.py` | 主程序入口，包含 GUI 界面、配置管理、文件扫描、打包处理等全部逻辑（单文件约 2600 行） |
+| `app.py` | 主程序入口，包含 GUI 界面、配置管理、文件扫描、打包处理等全部逻辑（单文件约 2300 行） |
 | `assets/app.ico` | 应用程序图标 |
 | `scripts/build_exe.ps1` | Windows PowerShell 构建脚本，自动创建虚拟环境、生成 Windows 版本信息、调用 PyInstaller |
 | `.github/workflows/release.yml` | GitHub Actions CI/CD 配置，自动化构建和发布（Python 3.11 + windows-latest） |

@@ -432,11 +432,12 @@ def _scan_3d_dir_fast(src_dir, include_xt=False):
 
 
 def build_3d_index(source_dirs, include_xt=False, max_workers=12, force_refresh=False):
-    """构建3D文件索引（支持递归），支持可选包含 XT 格式以及 .stp。使用多线程加速。
+    """构建3D文件索引（支持递归），始终扫描包含 XT 格式文件，使用时再根据 include_xt 过滤。使用多线程加速。
     三级回退：会话内存缓存 → 磁盘缓存（跨会话）→ 全量扫描。
     force_refresh=True 时跳过两级缓存，重新全量扫描并回写缓存。
+    注意：缓存键不再包含 include_xt，以确保勾选/取消勾选 XT 复选框后无需重新构建索引。
     """
-    cache_key = (tuple(sorted(source_dirs)), include_xt)
+    cache_key = tuple(sorted(source_dirs))
 
     # 1. 会话内存缓存
     if not force_refresh and cache_key in _3D_INDEX_CACHE:
@@ -454,14 +455,14 @@ def build_3d_index(source_dirs, include_xt=False, max_workers=12, force_refresh=
             print(f"✅ 3D索引命中磁盘缓存: {file_count} 个文件")
             return disk_index
 
-    # 3. 全量扫描
+    # 3. 全量扫描（始终包含 XT 文件，使用时再过滤）
     print("⏳ 正在构建3D文件索引（多线程扫描）...")
     start_time = time.time()
 
-    # 多线程并行扫描各个源目录
+    # 多线程并行扫描各个源目录，始终扫描 XT 文件
     all_results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_scan_3d_dir_fast, src, include_xt): src for src in source_dirs}
+        futures = {executor.submit(_scan_3d_dir_fast, src, True): src for src in source_dirs}
         for future in as_completed(futures):
             src = futures[future]
             try:
@@ -495,7 +496,8 @@ def build_3d_index(source_dirs, include_xt=False, max_workers=12, force_refresh=
 # 同会话内对相同源目录集合的重复调用直接命中，避免重复遍历网络驱动器；源目录变更则自动失效。
 _2D_INDEX_CACHE: dict[tuple, tuple] = {}
 
-# 会话级 3D 索引缓存：cache_key=(排序后的源目录元组, include_xt) -> index。
+# 会话级 3D 索引缓存：cache_key=(排序后的源目录元组) -> index。
+# 构建时始终包含 XT 文件，使用时通过 include_xt 参数过滤，避免勾选/取消勾选 XT 后重复构建索引。
 _3D_INDEX_CACHE: dict[tuple, dict] = {}
 
 _INDEX_REBUILT_THIS_SESSION = False
@@ -814,11 +816,13 @@ def _build_2d_index_silent(source_dirs, max_workers=12):
 
 
 def _build_3d_index_silent(source_dirs, include_xt=False, max_workers=12):
-    """静默构建3D索引（不写会话缓存，仅扫描并返回结果）。"""
-    cache_key = (tuple(sorted(source_dirs)), include_xt)
+    """静默构建3D索引（不写会话缓存，仅扫描并返回结果）。
+    注意：始终扫描 XT 文件，缓存键不包含 include_xt。
+    """
+    cache_key = tuple(sorted(source_dirs))
     all_results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_scan_3d_dir_fast, src, include_xt): src for src in source_dirs}
+        futures = {executor.submit(_scan_3d_dir_fast, src, True): src for src in source_dirs}
         for future in as_completed(futures):
             try:
                 results = future.result()
@@ -966,22 +970,47 @@ def read_original_file_list(list_file):
         return None
 
 
-def find_3d_file(search_name, index_3d, rename_3d=False):
-    """查找3D文件，返回 (src_path, src_filename, dst_name) 或 None。"""
+def find_3d_file(search_name, index_3d, rename_3d=False, include_xt=False):
+    """查找3D文件，返回 (src_path, src_filename, dst_name) 或 None。
+    include_xt=False 时优先匹配非 XT 文件，找不到时返回 None（不匹配 XT）。
+    include_xt=True 时可以匹配任何 3D 文件（STEP/STP/XT/X_T）。
+    """
     prefix_key = search_name[:4] if len(search_name) >= 4 else search_name
     if prefix_key not in index_3d:
         return None
 
+    candidates = []
     for clean_base, src_filename, src_dir in index_3d[prefix_key]:
         if clean_base == search_name:
-            src_path = os.path.join(src_dir, src_filename)
-            if rename_3d:
-                src_ext = os.path.splitext(src_filename)[1]
-                dst_name = f"{search_name}{src_ext.upper()}"
-            else:
-                dst_name = src_filename
-            return (src_path, src_filename, dst_name)
-    return None
+            candidates.append((clean_base, src_filename, src_dir))
+    if not candidates:
+        return None
+
+    # 判断是否 XT 变体
+    def is_xt_file(fn):
+        lower = fn.lower()
+        return lower.endswith('.xt') or lower.endswith('.x_t')
+
+    selected = None
+    if include_xt:
+        # 允许 XT：优先非 XT，其次 XT
+        non_xt = [c for c in candidates if not is_xt_file(c[1])]
+        selected = (non_xt or candidates)[0]
+    else:
+        # 不允许 XT：仅取非 XT
+        non_xt = [c for c in candidates if not is_xt_file(c[1])]
+        if not non_xt:
+            return None
+        selected = non_xt[0]
+
+    clean_base, src_filename, src_dir = selected
+    src_path = os.path.join(src_dir, src_filename)
+    if rename_3d:
+        src_ext = os.path.splitext(src_filename)[1]
+        dst_name = f"{search_name}{src_ext.upper()}"
+    else:
+        dst_name = src_filename
+    return (src_path, src_filename, dst_name)
 
 
 def find_2d_file(search_name, index_2d):
@@ -1024,7 +1053,7 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
             "files_missing": [],
         }
 
-    found_3d = find_3d_file(search_name, index_3d, rename_3d=rename_3d)
+    found_3d = find_3d_file(search_name, index_3d, rename_3d=rename_3d, include_xt=include_xt)
     found_2d = find_2d_file(search_name, index_2d)
 
     files_to_pack = []
