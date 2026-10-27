@@ -1040,7 +1040,7 @@ def find_2d_file(search_name, index_2d):
 
 
 def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_event, rename_3d, include_xt, spec_mode=False):
-    """处理单个清单项：查找2D和3D文件，打包为ZIP。仕样号模式下跳过已存在的ZIP。"""
+    """处理单个清单项：查找2D和3D文件，打包为ZIP。仕样号模式下覆盖已存在的ZIP。"""
     original_name, search_name = item
 
     if stop_event.is_set():
@@ -1099,16 +1099,7 @@ def process_item(item, output_dir, index_3d, index_2d, retry_attempts, stop_even
     zip_filename = f"{original_name}.zip"
     zip_path = os.path.join(output_dir, zip_filename)
 
-    # 仕样号模式：若ZIP已存在则跳过（追加模式，不覆盖已有数据）
-    if spec_mode and os.path.exists(zip_path):
-        return {
-            "status": "skipped",
-            "original": original_name,
-            "zip_file": zip_filename,
-            "found_3d_path": found_3d_path,
-            "found_2d_path": found_2d_path,
-            "files_missing": files_missing,
-        }
+    # 仕样号模式：覆盖模式，不再跳过已存在的ZIP
 
     for attempt in range(retry_attempts):
         if stop_event.is_set():
@@ -1183,9 +1174,9 @@ def worker(config, progress_callback, stop_event):
     spec_mode = config.get("spec_mode", False)
 
     if spec_mode:
-        # 仕样号模式：不清空目录，仅确保存在（追加模式）
+        # 仕样号模式：不清空目录，仅确保存在（覆盖模式，已存在ZIP将被覆盖）
         os.makedirs(output_dir, exist_ok=True)
-        print(f"📁 仕样号目录已就绪（追加模式，不清空）: {output_dir}")
+        print(f"📁 仕样号目录已就绪（覆盖模式，不清空）: {output_dir}")
     else:
         ensure_output_directory(output_dir)
 
@@ -1217,7 +1208,7 @@ def worker(config, progress_callback, stop_event):
 
     search_items = [(orig, clean_filename(orig)) for orig in original_files]
 
-    mode_hint = "（仕样号追加模式）" if spec_mode else ""
+    mode_hint = "（仕样号覆盖模式）" if spec_mode else ""
     print(f"📦 开始并行打包{mode_hint}... {'(3D将按清单重命名)' if rename_3d else ''} {'(包含XT)' if include_xt else ''}")
     executor = ThreadPoolExecutor(max_workers=max_workers)
     futures = [
@@ -2570,7 +2561,7 @@ class GunbagFetcherApp(ttk.Window):
         self.config_data["spec_mode"] = spec_mode
 
         if spec_mode:
-            # 仕样号模式：校验仕样号并准备仕样号目录（不清空，追加模式）
+            # 仕样号模式：校验仕样号并准备仕样号目录（不清空，覆盖模式）
             spec_number = self._get_spec_number()
             if not spec_number or not spec_number.isdigit() or len(spec_number) != 5:
                 messagebox.showerror("错误", "请输入5位纯数字的仕样号")
@@ -2586,10 +2577,10 @@ class GunbagFetcherApp(ttk.Window):
                 return
 
             if folder_existed:
-                print(f"📁 仕样号目录已存在，将追加打包（已存在的ZIP会跳过）: {spec_dir}")
+                print(f"📁 仕样号目录已存在，将以覆盖模式打包（已存在的ZIP将被覆盖）: {spec_dir}")
                 messagebox.showinfo(
                     "提示",
-                    f"仕样号目录已存在，将追加打包：\n{spec_dir}\n\n已存在的ZIP文件将被跳过。",
+                    f"仕样号目录已存在，将以覆盖模式打包：\n{spec_dir}\n\n已存在的ZIP文件将被覆盖。",
                 )
             else:
                 print(f"📁 已创建仕样号目录: {spec_dir}")
